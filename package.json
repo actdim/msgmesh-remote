@@ -73,11 +73,11 @@
         "format:check": "prettier --check ."
     },
     "peerDependencies": {
-        "@actdim/msgmesh": "workspace:*",
+        "@actdim/msgmesh": ">=1.10.2",
         "rxjs": ">=7.8.0"
     },
     "devDependencies": {
-        "@actdim/msgmesh": "workspace:*",
+        "@actdim/msgmesh": ">=1.10.2",
         "@types/node": "^24.10.0",
         "prettier": "^3.5.3",
         "rxjs": "^7.8.2",
