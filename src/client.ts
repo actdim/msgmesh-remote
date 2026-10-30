@@ -5,6 +5,8 @@ import {
     type RemoteMsgFrame,
     type RemoteBusLike,
 } from './types';
+
+export type { RemoteBusLike };
 import {
     defaultCodec,
     createSubFrame,
@@ -18,10 +20,10 @@ import {
 export type ClientConnectionState = 'CONNECTING' | 'OPEN' | 'RECONNECTING' | 'CLOSED';
 
 export interface RemoteClientOptions {
-    url?: string;
+    url?: string | (() => string);
     socketFactory?: () => WebSocket | RemoteSocket;
     token?: string;
-    tokenGetter?: () => string | Promise<string>;
+    tokenGetter?: () => string | undefined | Promise<string | undefined>;
     codec?: FrameCodec;
     heartbeatIntervalMs?: number;
     heartbeatTimeoutMs?: number;
@@ -113,7 +115,8 @@ export class RemoteMeshClient<TChannel extends string = string> {
                 if (typeof WebSocket === 'undefined') {
                     throw new Error('Global WebSocket not found. Provide a custom socketFactory in options.');
                 }
-                this.socket = new WebSocket(this.options.url);
+                const resolvedUrl = typeof this.options.url === 'function' ? this.options.url() : this.options.url;
+                this.socket = new WebSocket(resolvedUrl);
             } else {
                 throw new Error('Either url or socketFactory must be provided to RemoteMeshClient.');
             }

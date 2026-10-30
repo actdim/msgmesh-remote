@@ -141,35 +141,28 @@ export interface RemoteSocket {
 }
 
 /**
- * Minimal contract for an in-process message bus compatible with @actdim/msgmesh.
+ * Minimal contract for an in-process message bus on the server.
  */
-export interface RemoteBusLike<TChannel extends string = string> {
+export interface RemoteServerBusLike<
+    TChannel extends string = string,
+    TGroup extends string = string,
+> {
     send?(msg: {
         channel: TChannel;
-        group?: string;
+        group?: TGroup;
         topic?: string;
         payload?: unknown;
     }): Promise<unknown> | void;
     request?(msg: {
         channel: TChannel;
-        group?: string;
+        group?: TGroup;
         topic?: string;
         payload?: unknown;
     }): Promise<unknown>;
-    provide?(params: {
-        channel: TChannel;
-        group?: string;
-        callback: (inMsg: {
-            address?: { channel: string; group?: string; topic?: string };
-            channel?: string;
-            topic?: string;
-            group?: string;
-            payload?: unknown;
-        }) => Promise<unknown> | unknown;
-    }): (() => void) | void;
     on?(params: {
-        channel: string;
-        group?: string;
+        channel: TChannel;
+        group?: TGroup;
+        topic?: string;
         options?: { abortSignal?: AbortSignal };
         callback: (msg: {
             address?: { channel: string; group?: string; topic?: string };
@@ -178,5 +171,25 @@ export interface RemoteBusLike<TChannel extends string = string> {
             topic?: string;
             payload?: unknown;
         }) => void;
+    }): (() => void) | void;
+}
+
+/**
+ * Full contract for an in-process message bus compatible with @actdim/msgmesh.
+ */
+export interface RemoteBusLike<
+    TChannel extends string = string,
+    TGroup extends string = string,
+> extends RemoteServerBusLike<TChannel, TGroup> {
+    provide?(params: {
+        channel: TChannel;
+        group?: TGroup;
+        callback: (inMsg: {
+            address?: { channel: string; group?: string; topic?: string };
+            channel?: string;
+            topic?: string;
+            group?: string;
+            payload?: unknown;
+        }) => Promise<unknown> | unknown;
     }): (() => void) | void;
 }

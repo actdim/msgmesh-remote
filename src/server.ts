@@ -7,8 +7,10 @@ import {
     type RemoteMsgFrame,
     type RemoteReqFrame,
     type RemoteAuthFrame,
-    type RemoteBusLike,
+    type RemoteServerBusLike,
 } from './types';
+
+export type { RemoteSocket, RemoteFrame, RemoteServerBusLike };
 import {
     defaultCodec,
     createResFrame,
@@ -24,9 +26,13 @@ export interface RemoteConnectionContext {
     metadata?: Record<string, unknown>;
 }
 
-export interface RemoteServerOptions<TChannel extends string = string> {
-    bus: RemoteBusLike<TChannel>;
+export interface RemoteServerOptions<
+    TChannel extends string = string,
+    TGroup extends string = string,
+> {
+    bus: RemoteServerBusLike<TChannel, TGroup>;
     codec?: FrameCodec;
+    resolveChannels?: (channelPattern: string) => TChannel[];
     onAuthenticate?: (
         token: string,
         context: RemoteConnectionContext,
@@ -47,8 +53,8 @@ export interface RemoteServerOptions<TChannel extends string = string> {
     };
 }
 
-interface SubscriptionRecord {
-    channel: string;
+interface SubscriptionRecord<TChannel extends string = string> {
+    channel: TChannel;
     group?: string;
     topic?: string;
 }
@@ -72,16 +78,19 @@ function matchGroupPattern(pattern?: string, group?: string): boolean {
     return pattern === group;
 }
 
-export class RemoteClientSession<TChannel extends string = string> {
+export class RemoteClientSession<
+    TChannel extends string = string,
+    TGroup extends string = string,
+> {
     public readonly context: RemoteConnectionContext;
-    private readonly subscriptions = new Map<string, SubscriptionRecord>();
+    private readonly subscriptions = new Map<string, SubscriptionRecord<TChannel>>();
     private readonly busSubscriptions = new Map<string, () => void>();
     private isClosed = false;
 
     constructor(
         public readonly socket: RemoteSocket,
         context: Partial<RemoteConnectionContext> | undefined,
-        private readonly server: RemoteMeshServer<TChannel>,
+        private readonly server: RemoteMeshServer<TChannel, TGroup>,
         private readonly codec: FrameCodec,
     ) {
         this.context = {
@@ -196,34 +205,41 @@ export class RemoteClientSession<TChannel extends string = string> {
             topic: frame.topic,
         });
 
-        const busChannel = frame.channel.endsWith('*') ? frame.channel.slice(0, -1) : frame.channel;
+        const channelsToListen: TChannel[] = this.server.options.resolveChannels
+            ? this.server.options.resolveChannels(frame.channel)
+            : [frame.channel];
 
-        if (!this.busSubscriptions.has(busChannel)) {
-            const abortController = new AbortController();
-            const bus = this.server.options.bus;
+        for (const busChannel of channelsToListen) {
+            const subKey = `${busChannel}::${frame.topic ?? ''}`;
+            if (!this.busSubscriptions.has(subKey)) {
+                const abortController = new AbortController();
+                const bus = this.server.options.bus;
 
-            if (typeof bus?.on === 'function') {
-                bus.on({
-                    channel: busChannel,
-                    options: { abortSignal: abortController.signal },
-                    callback: (msg) => {
-                        const eventChannel = msg?.address?.channel || msg?.channel || busChannel;
-                        const eventTopic = msg?.address?.topic || msg?.topic;
-                        const eventGroup = msg?.address?.group || msg?.group;
-                        const eventPayload = msg?.payload !== undefined ? msg.payload : msg;
+                if (typeof bus?.on === 'function') {
+                    const busTopic = frame.topic === '*' ? '/.*/' : frame.topic;
+                    bus.on({
+                        channel: busChannel,
+                        topic: busTopic,
+                        options: { abortSignal: abortController.signal },
+                        callback: (msg) => {
+                            const eventChannel = msg?.address?.channel || msg?.channel || busChannel;
+                            const eventTopic = msg?.address?.topic || msg?.topic;
+                            const eventGroup = msg?.address?.group || msg?.group;
+                            const eventPayload = msg?.payload !== undefined ? msg.payload : msg;
 
-                        if (this.isSubscribed(eventChannel, eventTopic, eventGroup)) {
-                            if (!this.canReceiveEvent(eventChannel, eventPayload, eventTopic, eventGroup)) {
-                                return;
+                            if (this.isSubscribed(eventChannel, eventTopic, eventGroup)) {
+                                if (!this.canReceiveEvent(eventChannel, eventPayload, eventTopic, eventGroup)) {
+                                    return;
+                                }
+                                this.send(createMsgFrame(eventChannel, eventPayload, eventTopic, eventGroup) as RemoteFrame<TChannel>);
                             }
-                            this.send(createMsgFrame(eventChannel, eventPayload, eventTopic, eventGroup) as RemoteFrame<TChannel>);
-                        }
-                    },
-                });
+                        },
+                    });
 
-                this.busSubscriptions.set(busChannel, () => {
-                    abortController.abort();
-                });
+                    this.busSubscriptions.set(subKey, () => {
+                        abortController.abort();
+                    });
+                }
             }
         }
     }
@@ -248,22 +264,30 @@ export class RemoteClientSession<TChannel extends string = string> {
         const key = `${frame.channel}::${frame.group ?? ''}::${frame.topic ?? ''}`;
         this.subscriptions.delete(key);
 
-        const busChannel = frame.channel.endsWith('*') ? frame.channel.slice(0, -1) : frame.channel;
+        const channelsToUnsub: TChannel[] = this.server.options.resolveChannels
+            ? this.server.options.resolveChannels(frame.channel)
+            : [frame.channel];
 
-        let hasRemaining = false;
-        for (const sub of this.subscriptions.values()) {
-            const subBusChannel = sub.channel.endsWith('*') ? sub.channel.slice(0, -1) : sub.channel;
-            if (subBusChannel === busChannel) {
-                hasRemaining = true;
-                break;
+        for (const busChannel of channelsToUnsub) {
+            const subKey = `${busChannel}::${frame.topic ?? ''}`;
+            let hasRemaining = false;
+            for (const sub of this.subscriptions.values()) {
+                const activeChannels: TChannel[] = this.server.options.resolveChannels
+                    ? this.server.options.resolveChannels(sub.channel)
+                    : [sub.channel];
+
+                if (activeChannels.includes(busChannel) && (sub.topic ?? '') === (frame.topic ?? '')) {
+                    hasRemaining = true;
+                    break;
+                }
             }
-        }
 
-        if (!hasRemaining) {
-            const unsub = this.busSubscriptions.get(busChannel);
-            if (unsub) {
-                unsub();
-                this.busSubscriptions.delete(busChannel);
+            if (!hasRemaining) {
+                const unsub = this.busSubscriptions.get(subKey);
+                if (unsub) {
+                    unsub();
+                    this.busSubscriptions.delete(subKey);
+                }
             }
         }
     }
@@ -273,7 +297,7 @@ export class RemoteClientSession<TChannel extends string = string> {
         if (typeof bus?.send === 'function') {
             void bus.send({
                 channel: frame.channel,
-                group: frame.group,
+                group: frame.group as TGroup | undefined,
                 topic: frame.topic,
                 payload: frame.payload,
             });
@@ -290,7 +314,7 @@ export class RemoteClientSession<TChannel extends string = string> {
         try {
             const response = await bus.request({
                 channel: frame.channel,
-                group: frame.group,
+                group: frame.group as TGroup | undefined,
                 topic: frame.topic,
                 payload: frame.payload,
             });
@@ -323,19 +347,22 @@ export class RemoteClientSession<TChannel extends string = string> {
     }
 }
 
-export class RemoteMeshServer<TChannel extends string = string> {
+export class RemoteMeshServer<
+    TChannel extends string = string,
+    TGroup extends string = string,
+> {
     public readonly codec: FrameCodec;
-    private readonly sessions = new Set<RemoteClientSession<TChannel>>();
+    private readonly sessions = new Set<RemoteClientSession<TChannel, TGroup>>();
 
-    constructor(public readonly options: RemoteServerOptions<TChannel>) {
+    constructor(public readonly options: RemoteServerOptions<TChannel, TGroup>) {
         this.codec = options.codec || defaultCodec;
     }
 
     public handleConnection(
         socket: RemoteSocket,
         context?: Partial<RemoteConnectionContext>,
-    ): RemoteClientSession<TChannel> {
-        const session = new RemoteClientSession<TChannel>(socket, context, this, this.codec);
+    ): RemoteClientSession<TChannel, TGroup> {
+        const session = new RemoteClientSession<TChannel, TGroup>(socket, context, this, this.codec);
         this.sessions.add(session);
 
         socket.on('message', (raw: unknown) => {
