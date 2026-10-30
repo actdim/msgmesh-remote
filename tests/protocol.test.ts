@@ -11,14 +11,16 @@ import {
     createResFrame,
     createPingFrame,
     createPongFrame,
+    createAuthFrame,
+    createAuthOkFrame,
+    createAuthFailFrame,
 } from '../src/protocol';
-import { type RemoteFrame } from '../src/types';
 
 describe('Remote Protocol & Codec', () => {
     const codec = new JsonFrameCodec();
 
-    it('encodes and decodes SUB frame', () => {
-        const frame = createSubFrame('APP.EVENTS', 'topic-1');
+    it('encodes and decodes SUB frame with group and topic', () => {
+        const frame = createSubFrame('APP.EVENTS', 'topic-1', 'in');
         const encoded = codec.encode(frame);
         const decoded = codec.decode(encoded);
 
@@ -26,6 +28,7 @@ describe('Remote Protocol & Codec', () => {
             t: 'SUB',
             channel: 'APP.EVENTS',
             topic: 'topic-1',
+            group: 'in',
         });
     });
 
@@ -40,9 +43,9 @@ describe('Remote Protocol & Codec', () => {
         });
     });
 
-    it('encodes and decodes MSG frame with payload', () => {
+    it('encodes and decodes MSG frame with payload and group', () => {
         const payload = { counter: 42, text: 'hello' };
-        const frame = createMsgFrame('CAD.TRANSFORM', payload, 'node-7');
+        const frame = createMsgFrame('CAD.TRANSFORM', payload, 'node-7', 'ex');
         const encoded = codec.encode(frame);
         const decoded = codec.decode(encoded);
 
@@ -50,12 +53,13 @@ describe('Remote Protocol & Codec', () => {
             t: 'MSG',
             channel: 'CAD.TRANSFORM',
             topic: 'node-7',
+            group: 'ex',
             payload,
         });
     });
 
-    it('encodes and decodes REQ frame', () => {
-        const frame = createReqFrame('req-123', 'API.USER.GET', { userId: 'u1' });
+    it('encodes and decodes REQ frame with group', () => {
+        const frame = createReqFrame('req-123', 'API.USER.GET', { userId: 'u1' }, undefined, 'in');
         const encoded = codec.encode(frame);
         const decoded = codec.decode(encoded);
 
@@ -63,6 +67,7 @@ describe('Remote Protocol & Codec', () => {
             t: 'REQ',
             id: 'req-123',
             channel: 'API.USER.GET',
+            group: 'in',
             payload: { userId: 'u1' },
         });
     });
@@ -99,6 +104,27 @@ describe('Remote Protocol & Codec', () => {
         expect(codec.decode(codec.encode(pong))).toEqual({ t: 'PONG' });
     });
 
+    it('encodes and decodes AUTH, AUTH_OK, and AUTH_FAIL frames', () => {
+        const auth = createAuthFrame('jwt-token-xyz', { platform: 'web' });
+        const authOk = createAuthOkFrame('user-42');
+        const authFail = createAuthFailFrame('Token expired', 401);
+
+        expect(codec.decode(codec.encode(auth))).toEqual({
+            t: 'AUTH',
+            token: 'jwt-token-xyz',
+            metadata: { platform: 'web' },
+        });
+        expect(codec.decode(codec.encode(authOk))).toEqual({
+            t: 'AUTH_OK',
+            userId: 'user-42',
+        });
+        expect(codec.decode(codec.encode(authFail))).toEqual({
+            t: 'AUTH_FAIL',
+            error: 'Token expired',
+            code: 401,
+        });
+    });
+
     it('supports Uint8Array decoding', () => {
         const frame = createPingFrame();
         const str = codec.encode(frame);
@@ -121,5 +147,7 @@ describe('Remote Protocol & Codec', () => {
         expect(() => validateFrame({ t: 'SUB', channel: '' })).toThrow(InvalidFrameError);
         expect(() => validateFrame({ t: 'REQ', channel: 'C1' })).toThrow(InvalidFrameError);
         expect(() => validateFrame({ t: 'RES' })).toThrow(InvalidFrameError);
+        expect(() => validateFrame({ t: 'AUTH' })).toThrow(InvalidFrameError);
+        expect(() => validateFrame({ t: 'AUTH_FAIL' })).toThrow(InvalidFrameError);
     });
 });

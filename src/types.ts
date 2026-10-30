@@ -1,14 +1,25 @@
 /**
  * Frame types supported by the @actdim/msgmesh-remote wire protocol.
  */
-export type RemoteFrameType = 'SUB' | 'UNSUB' | 'MSG' | 'REQ' | 'RES' | 'PING' | 'PONG';
+export type RemoteFrameType =
+    | 'SUB'
+    | 'UNSUB'
+    | 'MSG'
+    | 'REQ'
+    | 'RES'
+    | 'PING'
+    | 'PONG'
+    | 'AUTH'
+    | 'AUTH_OK'
+    | 'AUTH_FAIL';
 
 /**
- * Client-to-server subscription request for a channel or topic.
+ * Client-to-server subscription request for a channel, group, or topic.
  */
 export type RemoteSubFrame = {
     t: 'SUB';
     channel: string;
+    group?: string;
     topic?: string;
 };
 
@@ -18,6 +29,7 @@ export type RemoteSubFrame = {
 export type RemoteUnsubFrame = {
     t: 'UNSUB';
     channel: string;
+    group?: string;
     topic?: string;
 };
 
@@ -27,6 +39,7 @@ export type RemoteUnsubFrame = {
 export type RemoteMsgFrame = {
     t: 'MSG';
     channel: string;
+    group?: string;
     topic?: string;
     payload?: unknown;
 };
@@ -38,6 +51,7 @@ export type RemoteReqFrame = {
     t: 'REQ';
     id: string;
     channel: string;
+    group?: string;
     topic?: string;
     payload?: unknown;
 };
@@ -67,6 +81,32 @@ export type RemotePongFrame = {
 };
 
 /**
+ * In-band authentication or token refresh request frame.
+ */
+export type RemoteAuthFrame = {
+    t: 'AUTH';
+    token: string;
+    metadata?: Record<string, unknown>;
+};
+
+/**
+ * Successful authentication response frame.
+ */
+export type RemoteAuthOkFrame = {
+    t: 'AUTH_OK';
+    userId?: string;
+};
+
+/**
+ * Failed authentication response frame.
+ */
+export type RemoteAuthFailFrame = {
+    t: 'AUTH_FAIL';
+    error: string;
+    code?: number;
+};
+
+/**
  * Union of all valid remote wire frames.
  */
 export type RemoteFrame =
@@ -76,7 +116,10 @@ export type RemoteFrame =
     | RemoteReqFrame
     | RemoteResFrame
     | RemotePingFrame
-    | RemotePongFrame;
+    | RemotePongFrame
+    | RemoteAuthFrame
+    | RemoteAuthOkFrame
+    | RemoteAuthFailFrame;
 
 /**
  * Pluggable serialization codec for encoding and decoding frames.

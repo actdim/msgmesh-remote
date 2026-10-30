@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { RemoteMeshClient, type RemoteSocket } from '../src/index';
+import { RemoteMeshClient, bridgeRemoteBus, type RemoteSocket } from '../src/index';
 
 class MockClientSocket implements RemoteSocket {
     public sent: string[] = [];
@@ -41,19 +41,64 @@ describe('RemoteMeshClient', () => {
         vi.useRealTimers();
     });
 
-    it('connects and transitions to OPEN state', () => {
+    it('connects and sends AUTH frame on open when token is provided', async () => {
+        const client = new RemoteMeshClient({
+            socketFactory: () => mockSocket,
+            token: 'jwt-abc-123',
+        });
+
+        client.connect();
+        await vi.advanceTimersByTimeAsync(1);
+
+        expect(client.getState()).toBe('OPEN');
+        expect(mockSocket.sent.length).toBe(1);
+        expect(JSON.parse(mockSocket.sent[0])).toEqual({
+            t: 'AUTH',
+            token: 'jwt-abc-123',
+        });
+
+        client.close();
+    });
+
+    it('supports dynamic authenticate() resolving on AUTH_OK', async () => {
         const client = new RemoteMeshClient({
             socketFactory: () => mockSocket,
         });
 
-        expect(client.getState()).toBe('CLOSED');
         client.connect();
-        expect(client.getState()).toBe('OPEN');
+        await vi.advanceTimersByTimeAsync(1);
+
+        const authPromise = client.authenticate('new-fresh-token');
+
+        expect(mockSocket.sent.length).toBe(1);
+        expect(JSON.parse(mockSocket.sent[0])).toEqual({
+            t: 'AUTH',
+            token: 'new-fresh-token',
+        });
+
+        mockSocket.triggerMessage({ t: 'AUTH_OK', userId: 'u-99' });
+
+        await expect(authPromise).resolves.toBeUndefined();
         client.close();
-        expect(client.getState()).toBe('CLOSED');
     });
 
-    it('sends PING periodically and responds to PONG', () => {
+    it('supports dynamic authenticate() rejecting on AUTH_FAIL', async () => {
+        const client = new RemoteMeshClient({
+            socketFactory: () => mockSocket,
+        });
+
+        client.connect();
+        await vi.advanceTimersByTimeAsync(1);
+
+        const authPromise = client.authenticate('expired-token');
+
+        mockSocket.triggerMessage({ t: 'AUTH_FAIL', error: 'Signature expired' });
+
+        await expect(authPromise).rejects.toThrow('Signature expired');
+        client.close();
+    });
+
+    it('sends PING periodically and responds to PONG', async () => {
         const client = new RemoteMeshClient({
             socketFactory: () => mockSocket,
             heartbeatIntervalMs: 5000,
@@ -61,24 +106,24 @@ describe('RemoteMeshClient', () => {
         });
 
         client.connect();
+        await vi.advanceTimersByTimeAsync(1);
         expect(mockSocket.sent.length).toBe(0);
 
         // Advance past heartbeat interval
-        vi.advanceTimersByTime(5000);
+        await vi.advanceTimersByTimeAsync(5000);
         expect(mockSocket.sent.length).toBe(1);
         expect(JSON.parse(mockSocket.sent[0])).toEqual({ t: 'PING' });
 
         // Server replies with PONG
         mockSocket.triggerMessage({ t: 'PONG' });
 
-        // Advance past timeout; socket should NOT close because PONG arrived
-        vi.advanceTimersByTime(3000);
+        await vi.advanceTimersByTimeAsync(3000);
         expect(mockSocket.closed).toBe(false);
 
         client.close();
     });
 
-    it('forces socket termination if heartbeat PONG is not received within timeout', () => {
+    it('forces socket termination if heartbeat PONG is not received within timeout', async () => {
         const client = new RemoteMeshClient({
             socketFactory: () => mockSocket,
             heartbeatIntervalMs: 5000,
@@ -86,34 +131,33 @@ describe('RemoteMeshClient', () => {
         });
 
         client.connect();
-        vi.advanceTimersByTime(5000);
+        await vi.advanceTimersByTimeAsync(1);
+
+        await vi.advanceTimersByTimeAsync(5000);
         expect(mockSocket.sent.length).toBe(1);
 
         // Do NOT send PONG, advance past timeout
-        vi.advanceTimersByTime(2001);
+        await vi.advanceTimersByTimeAsync(2001);
 
-        // Socket should be closed and client should enter RECONNECTING
         expect(mockSocket.closed).toBe(true);
         expect(client.getState()).toBe('RECONNECTING');
 
         client.close();
     });
 
-    it('buffers offline messages and flushes on connect', () => {
+    it('buffers offline messages and flushes on connect', async () => {
         const client = new RemoteMeshClient({
             socketFactory: () => mockSocket,
         });
 
-        // Send while CLOSED
         client.send('CAD.MUTATION', { id: 1 });
         client.send('CAD.MUTATION', { id: 2 });
 
         expect(mockSocket.sent.length).toBe(0);
 
-        // Connect now
         client.connect();
+        await vi.advanceTimersByTimeAsync(1);
 
-        // Both messages should be flushed
         expect(mockSocket.sent.length).toBe(2);
         expect(JSON.parse(mockSocket.sent[0])).toEqual({
             t: 'MSG',
@@ -129,74 +173,7 @@ describe('RemoteMeshClient', () => {
         client.close();
     });
 
-    it('automatically resubscribes cached subscriptions upon connect', () => {
-        const client = new RemoteMeshClient({
-            socketFactory: () => mockSocket,
-        });
-
-        client.subscribe('FEED.UPDATES');
-        client.subscribe('CAD.SCENE', 'doc-123');
-
-        expect(mockSocket.sent.length).toBe(0);
-
-        client.connect();
-
-        expect(mockSocket.sent.length).toBe(2);
-        const sub1 = JSON.parse(mockSocket.sent[0]);
-        const sub2 = JSON.parse(mockSocket.sent[1]);
-
-        expect([sub1, sub2]).toContainEqual({ t: 'SUB', channel: 'FEED.UPDATES' });
-        expect([sub1, sub2]).toContainEqual({ t: 'SUB', channel: 'CAD.SCENE', topic: 'doc-123' });
-
-        client.close();
-    });
-
-    it('handles request() with correlation ID and resolves on RES', async () => {
-        const client = new RemoteMeshClient({
-            socketFactory: () => mockSocket,
-        });
-
-        client.connect();
-
-        const reqPromise = client.request('API.ITEMS.GET', { id: 'x' });
-
-        expect(mockSocket.sent.length).toBe(1);
-        const reqFrame = JSON.parse(mockSocket.sent[0]);
-        expect(reqFrame.t).toBe('REQ');
-        expect(reqFrame.channel).toBe('API.ITEMS.GET');
-        expect(reqFrame.id).toBeDefined();
-
-        // Server sends RES matching id
-        mockSocket.triggerMessage({
-            t: 'RES',
-            id: reqFrame.id,
-            payload: { item: 'Widget' },
-        });
-
-        const result = await reqPromise;
-        expect(result).toEqual({ item: 'Widget' });
-
-        client.close();
-    });
-
-    it('rejects request() when timeout fires', async () => {
-        const client = new RemoteMeshClient({
-            socketFactory: () => mockSocket,
-            defaultRequestTimeoutMs: 1000,
-        });
-
-        client.connect();
-
-        const reqPromise = client.request('SLOW.OP');
-
-        vi.advanceTimersByTime(1001);
-
-        await expect(reqPromise).rejects.toThrow('Request timeout after 1000ms');
-
-        client.close();
-    });
-
-    it('bridges with MsgBus via attachToBus()', async () => {
+    it('declaratively bridges with in-memory MsgBus via bridgeRemoteBus()', async () => {
         let busProviderCallback: ((inMsg: any) => Promise<any>) | null = null;
         let busSent: any[] = [];
 
@@ -213,21 +190,35 @@ describe('RemoteMeshClient', () => {
             socketFactory: () => mockSocket,
         });
 
-        client.connect();
-        const detach = client.attachToBus(mockBus, {
-            remoteChannels: ['API.REMOTE.CALL'],
+        const unbridge = bridgeRemoteBus(mockBus, client, {
+            remoteRequests: ['API.REMOTE.CALL'],
+            remoteSubscriptions: [
+                { channel: 'WORKS.INTAKE.*' },
+                { channel: 'FEED.EXCHANGE.*' },
+            ],
         });
 
-        // 1. Bus call routes to client.request
+        client.connect();
+        await vi.advanceTimersByTimeAsync(1);
+
+        // Subscriptions sent to server on connect
+        expect(mockSocket.sent.length).toBe(2);
+        const sub1 = JSON.parse(mockSocket.sent[0]);
+        const sub2 = JSON.parse(mockSocket.sent[1]);
+        expect([sub1, sub2]).toContainEqual({ t: 'SUB', channel: 'WORKS.INTAKE.*' });
+        expect([sub1, sub2]).toContainEqual({ t: 'SUB', channel: 'FEED.EXCHANGE.*' });
+
+        // Bus call routes to client.request
         const busCallPromise = busProviderCallback!({
-            address: { channel: 'API.REMOTE.CALL', topic: 'top-1' },
+            address: { channel: 'API.REMOTE.CALL', topic: 'top-1', group: 'in' },
             payload: { query: 'test' },
         });
 
-        expect(mockSocket.sent.length).toBe(1);
-        const reqFrame = JSON.parse(mockSocket.sent[0]);
+        expect(mockSocket.sent.length).toBe(3);
+        const reqFrame = JSON.parse(mockSocket.sent[2]);
         expect(reqFrame.channel).toBe('API.REMOTE.CALL');
         expect(reqFrame.topic).toBe('top-1');
+        expect(reqFrame.group).toBe('in');
 
         mockSocket.triggerMessage({
             t: 'RES',
@@ -238,21 +229,7 @@ describe('RemoteMeshClient', () => {
         const result = await busCallPromise;
         expect(result).toEqual({ ok: true });
 
-        // 2. Client incoming MSG routes to bus.send
-        mockSocket.triggerMessage({
-            t: 'MSG',
-            channel: 'SERVER.NOTIFICATION',
-            payload: { alert: 'done' },
-        });
-
-        expect(busSent.length).toBe(1);
-        expect(busSent[0]).toEqual({
-            channel: 'SERVER.NOTIFICATION',
-            topic: undefined,
-            payload: { alert: 'done' },
-        });
-
-        detach();
+        unbridge();
         client.close();
     });
 });

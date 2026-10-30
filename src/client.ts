@@ -11,6 +11,7 @@ import {
     createMsgFrame,
     createReqFrame,
     createPingFrame,
+    createAuthFrame,
 } from './protocol';
 
 export type ClientConnectionState = 'CONNECTING' | 'OPEN' | 'RECONNECTING' | 'CLOSED';
@@ -18,6 +19,8 @@ export type ClientConnectionState = 'CONNECTING' | 'OPEN' | 'RECONNECTING' | 'CL
 export interface RemoteClientOptions {
     url?: string;
     socketFactory?: () => WebSocket | RemoteSocket;
+    token?: string;
+    tokenGetter?: () => string | Promise<string>;
     codec?: FrameCodec;
     heartbeatIntervalMs?: number;
     heartbeatTimeoutMs?: number;
@@ -33,9 +36,16 @@ export interface RemoteClientOptions {
     };
 }
 
-export interface AttachToBusOptions {
-    remoteChannels?: string[] | ((channel: string) => boolean);
-    subscribeRemoteEvents?: boolean;
+export interface RemoteSubscriptionItem {
+    channel: string;
+    topic?: string;
+    group?: string;
+}
+
+export interface RemoteBusBridgeConfig {
+    remoteRequests?: string[] | ((channel: string) => boolean);
+    sendToRemote?: string[] | ((channel: string) => boolean);
+    remoteSubscriptions?: RemoteSubscriptionItem[];
 }
 
 interface PendingRequest {
@@ -45,13 +55,20 @@ interface PendingRequest {
     frame: RemoteFrame;
 }
 
+interface PendingAuth {
+    resolve: (value: void) => void;
+    reject: (reason?: unknown) => void;
+    timer: ReturnType<typeof setTimeout>;
+}
+
 export class RemoteMeshClient {
     public readonly codec: FrameCodec;
     private state: ClientConnectionState = 'CLOSED';
     private socket: WebSocket | RemoteSocket | null = null;
-    private readonly subscriptions = new Set<string>();
+    private readonly subscriptions = new Map<string, RemoteSubscriptionItem>();
     private readonly offlineQueue: RemoteMsgFrame[] = [];
     private readonly pendingRequests = new Map<string, PendingRequest>();
+    private pendingAuth: PendingAuth | null = null;
 
     private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     private heartbeatTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -108,10 +125,17 @@ export class RemoteMeshClient {
     }
 
     private wireSocketEvents(sock: WebSocket | RemoteSocket): void {
-        const handleOpen = () => {
+        const handleOpen = async () => {
             this.reconnectAttempts = 0;
             this.setState('OPEN');
             this.startHeartbeat();
+
+            // Perform in-band authentication if token or tokenGetter is configured
+            const token = this.options.token ?? (await this.options.tokenGetter?.());
+            if (token) {
+                this.sendRaw(createAuthFrame(token));
+            }
+
             this.resubscribeAll();
             this.flushOfflineQueue();
         };
@@ -137,22 +161,18 @@ export class RemoteMeshClient {
 
         const handleError = (err: unknown) => {
             this.options.logger?.warn?.('Socket encountered error:', err);
-            // Close event will follow in standard WebSockets
         };
 
         if ('addEventListener' in sock && typeof sock.addEventListener === 'function') {
-            // Standard browser WebSocket
-            sock.addEventListener('open', handleOpen);
+            sock.addEventListener('open', () => void handleOpen());
             sock.addEventListener('message', handleMessage);
             sock.addEventListener('close', handleClose);
             sock.addEventListener('error', handleError);
         } else if ('on' in sock && typeof sock.on === 'function') {
-            // Duck-typed RemoteSocket
             sock.on('message', handleMessage);
             sock.on('close', handleClose);
             sock.on('error', handleError);
-            // RemoteSocket created already open or triggers via message
-            handleOpen();
+            void handleOpen();
         }
     }
 
@@ -160,6 +180,23 @@ export class RemoteMeshClient {
         switch (frame.t) {
             case 'PONG':
                 this.clearHeartbeatTimeout();
+                break;
+
+            case 'AUTH_OK':
+                if (this.pendingAuth) {
+                    clearTimeout(this.pendingAuth.timer);
+                    this.pendingAuth.resolve();
+                    this.pendingAuth = null;
+                }
+                break;
+
+            case 'AUTH_FAIL':
+                if (this.pendingAuth) {
+                    clearTimeout(this.pendingAuth.timer);
+                    this.pendingAuth.reject(new Error(`[msgmesh-remote] Auth failed: ${frame.error}`));
+                    this.pendingAuth = null;
+                }
+                this.options.logger?.warn?.(`Authentication rejected by server: ${frame.error}`);
                 break;
 
             case 'RES': {
@@ -188,10 +225,30 @@ export class RemoteMeshClient {
             }
 
             case 'PING':
-                // Server heartbeat ping: reply with PONG
                 this.sendRaw({ t: 'PONG' });
                 break;
         }
+    }
+
+    public async authenticate(token: string, timeoutMs = 10000): Promise<void> {
+        if (this.state !== 'OPEN') {
+            throw new Error('[msgmesh-remote] Cannot authenticate while socket is not OPEN');
+        }
+
+        return new Promise<void>((resolve, reject) => {
+            if (this.pendingAuth) {
+                clearTimeout(this.pendingAuth.timer);
+                this.pendingAuth.reject(new Error('Superseded by new authentication request'));
+            }
+
+            const timer = setTimeout(() => {
+                this.pendingAuth = null;
+                reject(new Error(`[msgmesh-remote] Authentication timeout after ${timeoutMs}ms`));
+            }, timeoutMs);
+
+            this.pendingAuth = { resolve, reject, timer };
+            this.sendRaw(createAuthFrame(token));
+        });
     }
 
     private startHeartbeat(): void {
@@ -202,10 +259,8 @@ export class RemoteMeshClient {
         this.heartbeatTimer = setInterval(() => {
             if (this.state !== 'OPEN') return;
 
-            // Send ping
             this.sendRaw(createPingFrame());
 
-            // Set missed pong timer to detect dead half-open sockets in mobile WebViews
             this.heartbeatTimeoutTimer = setTimeout(() => {
                 this.options.logger?.warn?.('Heartbeat PONG timeout exceeded; terminating dead socket');
                 this.forceSocketTermination();
@@ -252,11 +307,8 @@ export class RemoteMeshClient {
     }
 
     private resubscribeAll(): void {
-        for (const sub of this.subscriptions) {
-            const parts = sub.split('::');
-            const channel = parts[0];
-            const topic = parts[1];
-            this.sendRaw(createSubFrame(channel, topic));
+        for (const sub of this.subscriptions.values()) {
+            this.sendRaw(createSubFrame(sub.channel, sub.topic, sub.group));
         }
     }
 
@@ -269,26 +321,26 @@ export class RemoteMeshClient {
         }
     }
 
-    public subscribe(channel: string, topic?: string): void {
-        const key = topic ? `${channel}::${topic}` : channel;
-        this.subscriptions.add(key);
+    public subscribe(channel: string, topic?: string, group?: string): void {
+        const key = `${channel}::${group ?? ''}::${topic ?? ''}`;
+        this.subscriptions.set(key, { channel, topic, group });
 
         if (this.state === 'OPEN') {
-            this.sendRaw(createSubFrame(channel, topic));
+            this.sendRaw(createSubFrame(channel, topic, group));
         }
     }
 
-    public unsubscribe(channel: string, topic?: string): void {
-        const key = topic ? `${channel}::${topic}` : channel;
+    public unsubscribe(channel: string, topic?: string, group?: string): void {
+        const key = `${channel}::${group ?? ''}::${topic ?? ''}`;
         this.subscriptions.delete(key);
 
         if (this.state === 'OPEN') {
-            this.sendRaw(createUnsubFrame(channel, topic));
+            this.sendRaw(createUnsubFrame(channel, topic, group));
         }
     }
 
-    public send(channel: string, payload?: unknown, topic?: string): void {
-        const frame = createMsgFrame(channel, payload, topic);
+    public send(channel: string, payload?: unknown, topic?: string, group?: string): void {
+        const frame = createMsgFrame(channel, payload, topic, group);
 
         if (this.state === 'OPEN') {
             this.sendRaw(frame);
@@ -305,11 +357,11 @@ export class RemoteMeshClient {
     public async request<T = unknown>(
         channel: string,
         payload?: unknown,
-        options?: { topic?: string; timeout?: number },
+        options?: { topic?: string; group?: string; timeout?: number },
     ): Promise<T> {
         const id = `req-${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
         const timeoutMs = options?.timeout ?? this.options.defaultRequestTimeoutMs ?? 10000;
-        const frame = createReqFrame(id, channel, payload, options?.topic);
+        const frame = createReqFrame(id, channel, payload, options?.topic, options?.group);
 
         return new Promise<T>((resolve, reject) => {
             const timer = setTimeout(() => {
@@ -326,8 +378,6 @@ export class RemoteMeshClient {
 
             if (this.state === 'OPEN') {
                 this.sendRaw(frame);
-            } else {
-                // If not currently open, let request wait in pending map until connection opens or timeout fires
             }
         });
     }
@@ -374,7 +424,12 @@ export class RemoteMeshClient {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
-        for (const [id, req] of this.pendingRequests.entries()) {
+        if (this.pendingAuth) {
+            clearTimeout(this.pendingAuth.timer);
+            this.pendingAuth.reject(new Error('[msgmesh-remote] Client connection closed'));
+            this.pendingAuth = null;
+        }
+        for (const req of this.pendingRequests.values()) {
             clearTimeout(req.timer);
             req.reject(new Error('[msgmesh-remote] Client connection closed'));
         }
@@ -385,48 +440,65 @@ export class RemoteMeshClient {
     }
 
     /**
-     * Bridges this remote client with an in-memory MsgBus instance.
+     * High-level declarative bridge between in-memory MsgBus and RemoteMeshClient.
      */
-    public attachToBus(bus: any, options?: AttachToBusOptions): () => void {
-        const isRemoteChannel = (channel: string): boolean => {
-            if (!options?.remoteChannels) return false;
-            if (typeof options.remoteChannels === 'function') {
-                return options.remoteChannels(channel);
-            }
-            return options.remoteChannels.includes(channel);
-        };
+    public attachToBus(bus: any, options?: RemoteBusBridgeConfig): () => void {
+        return bridgeRemoteBus(bus, this, options);
+    }
+}
 
-        // Forward incoming remote MSG frames into local bus
-        const unsubIncoming = this.onMessage((frame) => {
-            if (typeof bus?.send === 'function') {
-                void bus.send({
-                    channel: frame.channel,
-                    topic: frame.topic,
-                    payload: frame.payload,
-                });
-            }
-        });
+/**
+ * Connects an in-memory MsgBus with a RemoteMeshClient declaratively.
+ */
+export function bridgeRemoteBus(
+    bus: any,
+    client: RemoteMeshClient,
+    config?: RemoteBusBridgeConfig,
+): () => void {
+    // 1. Subscribe to remote events specified in config
+    if (config?.remoteSubscriptions) {
+        for (const sub of config.remoteSubscriptions) {
+            client.subscribe(sub.channel, sub.topic, sub.group);
+        }
+    }
 
-        // Register provider for remote request channels
-        const providers: Array<() => void> = [];
-        if (typeof bus?.provide === 'function' && Array.isArray(options?.remoteChannels)) {
-            for (const channel of options.remoteChannels) {
-                const unsubProvider = bus.provide({
-                    channel,
-                    callback: async (inMsg: any) => {
-                        const topic = inMsg?.address?.topic || inMsg?.topic;
-                        return this.request(channel, inMsg?.payload, { topic });
-                    },
-                });
-                if (typeof unsubProvider === 'function') {
-                    providers.push(unsubProvider);
-                }
+    // 2. Forward incoming remote MSG frames into local bus
+    const unsubIncoming = client.onMessage((frame) => {
+        if (typeof bus?.send === 'function') {
+            void bus.send({
+                channel: frame.channel,
+                group: frame.group,
+                topic: frame.topic,
+                payload: frame.payload,
+            });
+        }
+    });
+
+    // 3. Register request providers on local bus
+    const providers: Array<() => void> = [];
+    if (typeof bus?.provide === 'function' && Array.isArray(config?.remoteRequests)) {
+        for (const channel of config.remoteRequests) {
+            const unsubProvider = bus.provide({
+                channel,
+                callback: async (inMsg: any) => {
+                    const topic = inMsg?.address?.topic || inMsg?.topic;
+                    const group = inMsg?.address?.group || inMsg?.group;
+                    return client.request(channel, inMsg?.payload, { topic, group });
+                },
+            });
+            if (typeof unsubProvider === 'function') {
+                providers.push(unsubProvider);
             }
         }
-
-        return () => {
-            unsubIncoming();
-            for (const p of providers) p();
-        };
     }
+
+    return () => {
+        unsubIncoming();
+        for (const p of providers) p();
+        if (config?.remoteSubscriptions) {
+            for (const sub of config.remoteSubscriptions) {
+                client.unsubscribe(sub.channel, sub.topic, sub.group);
+            }
+        }
+    };
 }

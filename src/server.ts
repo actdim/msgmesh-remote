@@ -6,12 +6,15 @@ import {
     type RemoteUnsubFrame,
     type RemoteMsgFrame,
     type RemoteReqFrame,
+    type RemoteAuthFrame,
 } from './types';
 import {
     defaultCodec,
     createResFrame,
     createPongFrame,
     createMsgFrame,
+    createAuthOkFrame,
+    createAuthFailFrame,
 } from './protocol';
 
 export interface RemoteConnectionContext {
@@ -23,7 +26,18 @@ export interface RemoteConnectionContext {
 export interface RemoteServerOptions {
     bus: any;
     codec?: FrameCodec;
+    onAuthenticate?: (
+        token: string,
+        context: RemoteConnectionContext,
+    ) => Promise<{ userId?: string; metadata?: Record<string, unknown> } | boolean | null> | { userId?: string; metadata?: Record<string, unknown> } | boolean | null;
     authorize?: (context: RemoteConnectionContext, frame: RemoteFrame) => boolean | Promise<boolean>;
+    filterEvent?: (
+        context: RemoteConnectionContext,
+        channel: string,
+        payload: unknown,
+        topic?: string,
+        group?: string,
+    ) => boolean;
     logger?: {
         debug?: (msg: string, ...args: unknown[]) => void;
         info?: (msg: string, ...args: unknown[]) => void;
@@ -32,9 +46,34 @@ export interface RemoteServerOptions {
     };
 }
 
+interface SubscriptionRecord {
+    channel: string;
+    group?: string;
+    topic?: string;
+}
+
+function matchChannelPattern(pattern: string, channel: string): boolean {
+    if (pattern === '*' || pattern === channel) return true;
+    if (pattern.endsWith('*')) {
+        const prefix = pattern.slice(0, -1);
+        return channel.startsWith(prefix);
+    }
+    return false;
+}
+
+function matchTopicPattern(pattern?: string, topic?: string): boolean {
+    if (!pattern || pattern === '*') return true;
+    return pattern === topic;
+}
+
+function matchGroupPattern(pattern?: string, group?: string): boolean {
+    if (!pattern || pattern === '*') return true;
+    return pattern === group;
+}
+
 export class RemoteClientSession {
     public readonly context: RemoteConnectionContext;
-    private readonly subscriptions = new Set<string>();
+    private readonly subscriptions = new Map<string, SubscriptionRecord>();
     private readonly busSubscriptions = new Map<string, () => void>();
     private isClosed = false;
 
@@ -61,17 +100,25 @@ export class RemoteClientSession {
         }
     }
 
-    public isSubscribed(channel: string, topic?: string): boolean {
-        if (this.subscriptions.has(channel)) {
-            return true;
-        }
-        if (topic && this.subscriptions.has(`${channel}::${topic}`)) {
-            return true;
+    public isSubscribed(channel: string, topic?: string, group?: string): boolean {
+        for (const sub of this.subscriptions.values()) {
+            if (
+                matchChannelPattern(sub.channel, channel) &&
+                matchTopicPattern(sub.topic, topic) &&
+                matchGroupPattern(sub.group, group)
+            ) {
+                return true;
+            }
         }
         return false;
     }
 
     public async handleFrame(frame: RemoteFrame): Promise<void> {
+        if (frame.t === 'AUTH') {
+            await this.handleAuth(frame);
+            return;
+        }
+
         if (this.server.options.authorize) {
             const allowed = await this.server.options.authorize(this.context, frame);
             if (!allowed) {
@@ -105,57 +152,120 @@ export class RemoteClientSession {
 
             case 'PONG':
             case 'RES':
-                // Client-side frames received on server; ignored or logged
+            case 'AUTH_OK':
+            case 'AUTH_FAIL':
                 break;
         }
     }
 
-    private handleSub(frame: RemoteSubFrame): void {
-        const key = frame.topic ? `${frame.channel}::${frame.topic}` : frame.channel;
-        this.subscriptions.add(key);
+    private async handleAuth(frame: RemoteAuthFrame): Promise<void> {
+        if (!this.server.options.onAuthenticate) {
+            this.send(createAuthOkFrame(this.context.userId));
+            return;
+        }
 
-        // Bind listener on server bus if not already registered for this channel
-        if (!this.busSubscriptions.has(frame.channel)) {
+        try {
+            const result = await this.server.options.onAuthenticate(frame.token, this.context);
+            if (!result) {
+                this.send(createAuthFailFrame('Authentication failed', 401));
+                return;
+            }
+
+            if (typeof result === 'object' && result !== null) {
+                if (result.userId) {
+                    this.context.userId = result.userId;
+                }
+                if (result.metadata) {
+                    this.context.metadata = { ...(this.context.metadata || {}), ...result.metadata };
+                }
+            }
+
+            this.send(createAuthOkFrame(this.context.userId));
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            this.send(createAuthFailFrame(message || 'Authentication error', 500));
+        }
+    }
+
+    private handleSub(frame: RemoteSubFrame): void {
+        const key = `${frame.channel}::${frame.group ?? ''}::${frame.topic ?? ''}`;
+        this.subscriptions.set(key, {
+            channel: frame.channel,
+            group: frame.group,
+            topic: frame.topic,
+        });
+
+        // Determine base channel or prefix to listen to on server bus
+        const busChannel = frame.channel.endsWith('*') ? frame.channel.slice(0, -1) : frame.channel;
+
+        if (!this.busSubscriptions.has(busChannel)) {
             const abortController = new AbortController();
             const bus = this.server.options.bus;
 
             if (typeof bus?.on === 'function') {
                 bus.on({
-                    channel: frame.channel,
+                    channel: busChannel,
                     options: { abortSignal: abortController.signal },
                     callback: (msg: any) => {
-                        const msgTopic = msg?.address?.topic || msg?.topic;
-                        if (this.isSubscribed(frame.channel, msgTopic)) {
-                            this.send(createMsgFrame(frame.channel, msg?.payload ?? msg, msgTopic));
+                        const eventChannel = msg?.address?.channel || msg?.channel || busChannel;
+                        const eventTopic = msg?.address?.topic || msg?.topic;
+                        const eventGroup = msg?.address?.group || msg?.group;
+                        const eventPayload = msg?.payload !== undefined ? msg.payload : msg;
+
+                        if (this.isSubscribed(eventChannel, eventTopic, eventGroup)) {
+                            // Check custom or default security event filter
+                            if (!this.canReceiveEvent(eventChannel, eventPayload, eventTopic, eventGroup)) {
+                                return;
+                            }
+                            this.send(createMsgFrame(eventChannel, eventPayload, eventTopic, eventGroup));
                         }
                     },
                 });
 
-                this.busSubscriptions.set(frame.channel, () => {
+                this.busSubscriptions.set(busChannel, () => {
                     abortController.abort();
                 });
             }
         }
     }
 
+    private canReceiveEvent(channel: string, payload: unknown, topic?: string, group?: string): boolean {
+        if (this.server.options.filterEvent) {
+            return this.server.options.filterEvent(this.context, channel, payload, topic, group);
+        }
+
+        // Built-in multi-tenant isolation guard: if payload carries userId or ownerUserId, verify it matches
+        if (payload && typeof payload === 'object') {
+            const p = payload as Record<string, unknown>;
+            const owner = p.userId ?? p.ownerUserId;
+            if (owner !== undefined && this.context.userId && String(owner) !== String(this.context.userId)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private handleUnsub(frame: RemoteUnsubFrame): void {
-        const key = frame.topic ? `${frame.channel}::${frame.topic}` : frame.channel;
+        const key = `${frame.channel}::${frame.group ?? ''}::${frame.topic ?? ''}`;
         this.subscriptions.delete(key);
 
-        // If no more subscriptions exist for this channel, unsubscribe from bus
-        let hasRemainingForChannel = false;
-        for (const sub of this.subscriptions) {
-            if (sub === frame.channel || sub.startsWith(`${frame.channel}::`)) {
-                hasRemainingForChannel = true;
+        const busChannel = frame.channel.endsWith('*') ? frame.channel.slice(0, -1) : frame.channel;
+
+        let hasRemaining = false;
+        for (const sub of this.subscriptions.values()) {
+            const subBusChannel = sub.channel.endsWith('*') ? sub.channel.slice(0, -1) : sub.channel;
+            if (subBusChannel === busChannel) {
+                hasRemaining = true;
                 break;
             }
         }
 
-        if (!hasRemainingForChannel) {
-            const unsub = this.busSubscriptions.get(frame.channel);
+        if (!hasRemaining) {
+            const unsub = this.busSubscriptions.get(busChannel);
             if (unsub) {
                 unsub();
-                this.busSubscriptions.delete(frame.channel);
+                this.busSubscriptions.delete(busChannel);
             }
         }
     }
@@ -165,6 +275,7 @@ export class RemoteClientSession {
         if (typeof bus?.send === 'function') {
             void bus.send({
                 channel: frame.channel,
+                group: frame.group,
                 topic: frame.topic,
                 payload: frame.payload,
             });
@@ -181,6 +292,7 @@ export class RemoteClientSession {
         try {
             const response = await bus.request({
                 channel: frame.channel,
+                group: frame.group,
                 topic: frame.topic,
                 payload: frame.payload,
             });
@@ -245,10 +357,10 @@ export class RemoteMeshServer {
         return session;
     }
 
-    public broadcast(channel: string, payload?: unknown, topic?: string): void {
-        const frame = createMsgFrame(channel, payload, topic);
+    public broadcast(channel: string, payload?: unknown, topic?: string, group?: string): void {
+        const frame = createMsgFrame(channel, payload, topic, group);
         for (const session of this.sessions) {
-            if (session.isSubscribed(channel, topic)) {
+            if (session.isSubscribed(channel, topic, group)) {
                 session.send(frame);
             }
         }

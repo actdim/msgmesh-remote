@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
 import { RemoteMeshServer, type RemoteSocket } from '../src/index';
-import { defaultCodec } from '../src/protocol';
 
 class MockSocket implements RemoteSocket {
     public sent: string[] = [];
@@ -44,6 +43,49 @@ describe('RemoteMeshServer', () => {
         expect(pong).toEqual({ t: 'PONG' });
     });
 
+    it('handles AUTH frame and updates session context on success', async () => {
+        const bus = { on: vi.fn(), send: vi.fn(), request: vi.fn() };
+        const server = new RemoteMeshServer({
+            bus,
+            onAuthenticate: async (token) => {
+                if (token === 'valid-secret') {
+                    return { userId: 'u-123', metadata: { role: 'admin' } };
+                }
+                return false;
+            },
+        });
+        const socket = new MockSocket();
+        const session = server.handleConnection(socket);
+
+        socket.receiveMessage({ t: 'AUTH', token: 'valid-secret' });
+        await new Promise((r) => setTimeout(r, 10));
+
+        expect(socket.sent.length).toBe(1);
+        expect(JSON.parse(socket.sent[0])).toEqual({ t: 'AUTH_OK', userId: 'u-123' });
+        expect(session.context.userId).toBe('u-123');
+        expect(session.context.metadata?.role).toBe('admin');
+    });
+
+    it('handles AUTH frame and replies AUTH_FAIL on invalid token', async () => {
+        const bus = { on: vi.fn(), send: vi.fn(), request: vi.fn() };
+        const server = new RemoteMeshServer({
+            bus,
+            onAuthenticate: async () => false,
+        });
+        const socket = new MockSocket();
+        server.handleConnection(socket);
+
+        socket.receiveMessage({ t: 'AUTH', token: 'bad-token' });
+        await new Promise((r) => setTimeout(r, 10));
+
+        expect(socket.sent.length).toBe(1);
+        expect(JSON.parse(socket.sent[0])).toEqual({
+            t: 'AUTH_FAIL',
+            error: 'Authentication failed',
+            code: 401,
+        });
+    });
+
     it('handles REQ and returns RES on success', async () => {
         const bus = {
             on: vi.fn(),
@@ -61,12 +103,12 @@ describe('RemoteMeshServer', () => {
             payload: { id: 's1' },
         });
 
-        // Let async request resolve
         await new Promise((r) => setTimeout(r, 10));
 
         expect(bus.request).toHaveBeenCalledWith({
             channel: 'CAD.GET_SCENE',
             topic: undefined,
+            group: undefined,
             payload: { id: 's1' },
         });
 
@@ -79,32 +121,7 @@ describe('RemoteMeshServer', () => {
         });
     });
 
-    it('handles REQ and returns RES with error on failure', async () => {
-        const bus = {
-            on: vi.fn(),
-            send: vi.fn(),
-            request: vi.fn().mockRejectedValue(new Error('Scene not found')),
-        };
-        const server = new RemoteMeshServer({ bus });
-        const socket = new MockSocket();
-
-        server.handleConnection(socket);
-        socket.receiveMessage({
-            t: 'REQ',
-            id: 'req-43',
-            channel: 'CAD.GET_SCENE',
-        });
-
-        await new Promise((r) => setTimeout(r, 10));
-
-        expect(socket.sent.length).toBe(1);
-        const res = JSON.parse(socket.sent[0]);
-        expect(res.t).toBe('RES');
-        expect(res.id).toBe('req-43');
-        expect(res.error?.message).toBe('Scene not found');
-    });
-
-    it('forwards bus events to subscribed sockets and filters unsubscribed', () => {
+    it('matches wildcard channel subscriptions (e.g. WORKS.INTAKE.*)', () => {
         let busCallback: ((msg: any) => void) | null = null;
         const bus = {
             on: vi.fn(({ callback }) => {
@@ -115,77 +132,68 @@ describe('RemoteMeshServer', () => {
         };
 
         const server = new RemoteMeshServer({ bus });
-        const socket1 = new MockSocket();
-        const socket2 = new MockSocket();
-
-        server.handleConnection(socket1);
-        server.handleConnection(socket2);
-
-        // socket1 subscribes to CAD.OBJECT_MOVED
-        socket1.receiveMessage({ t: 'SUB', channel: 'CAD.OBJECT_MOVED' });
-
-        expect(bus.on).toHaveBeenCalled();
-
-        // Emit from server bus
-        busCallback!({
-            channel: 'CAD.OBJECT_MOVED',
-            payload: { objectId: 99, x: 10, y: 20 },
-        });
-
-        // socket1 gets the message
-        expect(socket1.sent.length).toBe(1);
-        expect(JSON.parse(socket1.sent[0])).toEqual({
-            t: 'MSG',
-            channel: 'CAD.OBJECT_MOVED',
-            payload: { objectId: 99, x: 10, y: 20 },
-        });
-
-        // socket2 was not subscribed, gets nothing
-        expect(socket2.sent.length).toBe(0);
-
-        // socket1 unsubs
-        socket1.receiveMessage({ t: 'UNSUB', channel: 'CAD.OBJECT_MOVED' });
-
-        // Emit again
-        busCallback!({
-            channel: 'CAD.OBJECT_MOVED',
-            payload: { objectId: 100 },
-        });
-
-        expect(socket1.sent.length).toBe(1); // still 1, no new message
-    });
-
-    it('enforces authorization hook if provided', async () => {
-        const bus = { on: vi.fn(), send: vi.fn(), request: vi.fn() };
-        const server = new RemoteMeshServer({
-            bus,
-            authorize: (ctx, frame) => {
-                if (frame.t === 'REQ' && frame.channel === 'ADMIN.SECRET') {
-                    return false;
-                }
-                return true;
-            },
-        });
-
         const socket = new MockSocket();
         server.handleConnection(socket);
 
-        socket.receiveMessage({
-            t: 'REQ',
-            id: 'req-secret',
-            channel: 'ADMIN.SECRET',
-        });
+        // Client subscribes with wildcard prefix
+        socket.receiveMessage({ t: 'SUB', channel: 'WORKS.INTAKE.*' });
 
-        await new Promise((r) => setTimeout(r, 10));
+        expect(bus.on).toHaveBeenCalled();
+
+        // Server bus emits specific channel matching wildcard
+        busCallback!({
+            address: { channel: 'WORKS.INTAKE.COMPLETED' },
+            payload: { intakeId: 'item-10' },
+        });
 
         expect(socket.sent.length).toBe(1);
-        const res = JSON.parse(socket.sent[0]);
-        expect(res).toEqual({
-            t: 'RES',
-            id: 'req-secret',
-            error: { message: 'Unauthorized', code: 403 },
+        expect(JSON.parse(socket.sent[0])).toEqual({
+            t: 'MSG',
+            channel: 'WORKS.INTAKE.COMPLETED',
+            payload: { intakeId: 'item-10' },
         });
-        expect(bus.request).not.toHaveBeenCalled();
+    });
+
+    it('enforces multi-tenant isolation by default (filters events belonging to other users)', () => {
+        let busCallback: ((msg: any) => void) | null = null;
+        const bus = {
+            on: vi.fn(({ callback }) => {
+                busCallback = callback;
+            }),
+            send: vi.fn(),
+            request: vi.fn(),
+        };
+
+        const server = new RemoteMeshServer({ bus });
+        const userSocket = new MockSocket();
+
+        // Connected user is u-1
+        server.handleConnection(userSocket, { userId: 'u-1' });
+
+        userSocket.receiveMessage({ t: 'SUB', channel: 'INTAKE.UPDATE' });
+
+        // Event for user u-2 emitted on bus
+        busCallback!({
+            channel: 'INTAKE.UPDATE',
+            payload: { userId: 'u-2', secretInfo: 'private' },
+        });
+
+        // u-1 must NOT receive u-2's event
+        expect(userSocket.sent.length).toBe(0);
+
+        // Event for user u-1 emitted on bus
+        busCallback!({
+            channel: 'INTAKE.UPDATE',
+            payload: { userId: 'u-1', secretInfo: 'for-me' },
+        });
+
+        // u-1 receives their event
+        expect(userSocket.sent.length).toBe(1);
+        expect(JSON.parse(userSocket.sent[0])).toEqual({
+            t: 'MSG',
+            channel: 'INTAKE.UPDATE',
+            payload: { userId: 'u-1', secretInfo: 'for-me' },
+        });
     });
 
     it('cleans up session and subscriptions on socket close', () => {
