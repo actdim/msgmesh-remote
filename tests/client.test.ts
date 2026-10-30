@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { RemoteMeshClient, bridgeRemoteBus, type RemoteSocket } from '../src/index';
+import { RemoteMeshClient, bridgeRemoteBus, type RemoteSocket, type RemoteBusLike } from '../src/index';
 
 class MockClientSocket implements RemoteSocket {
     public sent: string[] = [];
@@ -12,10 +12,16 @@ class MockClientSocket implements RemoteSocket {
         this.sent.push(typeof data === 'string' ? data : new TextDecoder().decode(data));
     }
 
-    on(event: 'message' | 'close' | 'error', listener: (...args: any[]) => void): void {
-        if (event === 'message') this.messageListeners.push(listener);
-        if (event === 'close') this.closeListeners.push(listener);
-        if (event === 'error') this.errorListeners.push(listener);
+    on(event: 'message', listener: (data: unknown) => void): void;
+    on(event: 'close', listener: (code?: number, reason?: string) => void): void;
+    on(event: 'error', listener: (err: unknown) => void): void;
+    on(
+        event: 'message' | 'close' | 'error',
+        listener: ((data: unknown) => void) | ((code?: number, reason?: string) => void) | ((err: unknown) => void),
+    ): void {
+        if (event === 'message') this.messageListeners.push(listener as (data: unknown) => void);
+        if (event === 'close') this.closeListeners.push(listener as (code?: number, reason?: string) => void);
+        if (event === 'error') this.errorListeners.push(listener as (err: unknown) => void);
     }
 
     close(): void {
@@ -109,12 +115,10 @@ describe('RemoteMeshClient', () => {
         await vi.advanceTimersByTimeAsync(1);
         expect(mockSocket.sent.length).toBe(0);
 
-        // Advance past heartbeat interval
         await vi.advanceTimersByTimeAsync(5000);
         expect(mockSocket.sent.length).toBe(1);
         expect(JSON.parse(mockSocket.sent[0])).toEqual({ t: 'PING' });
 
-        // Server replies with PONG
         mockSocket.triggerMessage({ t: 'PONG' });
 
         await vi.advanceTimersByTimeAsync(3000);
@@ -136,7 +140,6 @@ describe('RemoteMeshClient', () => {
         await vi.advanceTimersByTimeAsync(5000);
         expect(mockSocket.sent.length).toBe(1);
 
-        // Do NOT send PONG, advance past timeout
         await vi.advanceTimersByTimeAsync(2001);
 
         expect(mockSocket.closed).toBe(true);
@@ -174,12 +177,13 @@ describe('RemoteMeshClient', () => {
     });
 
     it('declaratively bridges with in-memory MsgBus via bridgeRemoteBus()', async () => {
-        let busProviderCallback: ((inMsg: any) => Promise<any>) | null = null;
-        let busSent: any[] = [];
+        let busProviderCallback: ((inMsg: { address?: { channel: string; topic?: string; group?: string }; payload?: unknown }) => Promise<unknown> | unknown) | null = null;
+        const busSent: Array<{ channel: string; topic?: string; group?: string; payload?: unknown }> = [];
 
-        const mockBus = {
-            provide: vi.fn(({ callback }) => {
-                busProviderCallback = callback;
+        const mockBus: RemoteBusLike = {
+            provide: vi.fn((params) => {
+                busProviderCallback = params.callback;
+                return () => {};
             }),
             send: vi.fn((msg) => {
                 busSent.push(msg);
@@ -201,14 +205,12 @@ describe('RemoteMeshClient', () => {
         client.connect();
         await vi.advanceTimersByTimeAsync(1);
 
-        // Subscriptions sent to server on connect
         expect(mockSocket.sent.length).toBe(2);
         const sub1 = JSON.parse(mockSocket.sent[0]);
         const sub2 = JSON.parse(mockSocket.sent[1]);
         expect([sub1, sub2]).toContainEqual({ t: 'SUB', channel: 'WORKS.INTAKE.*' });
         expect([sub1, sub2]).toContainEqual({ t: 'SUB', channel: 'FEED.EXCHANGE.*' });
 
-        // Bus call routes to client.request
         const busCallPromise = busProviderCallback!({
             address: { channel: 'API.REMOTE.CALL', topic: 'top-1', group: 'in' },
             payload: { query: 'test' },

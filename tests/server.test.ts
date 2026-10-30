@@ -12,10 +12,16 @@ class MockSocket implements RemoteSocket {
         this.sent.push(typeof data === 'string' ? data : new TextDecoder().decode(data));
     }
 
-    on(event: 'message' | 'close' | 'error', listener: (...args: any[]) => void): void {
-        if (event === 'message') this.messageListeners.push(listener);
-        if (event === 'close') this.closeListeners.push(listener);
-        if (event === 'error') this.errorListeners.push(listener);
+    on(event: 'message', listener: (data: unknown) => void): void;
+    on(event: 'close', listener: (code?: number, reason?: string) => void): void;
+    on(event: 'error', listener: (err: unknown) => void): void;
+    on(
+        event: 'message' | 'close' | 'error',
+        listener: ((data: unknown) => void) | ((code?: number, reason?: string) => void) | ((err: unknown) => void),
+    ): void {
+        if (event === 'message') this.messageListeners.push(listener as (data: unknown) => void);
+        if (event === 'close') this.closeListeners.push(listener as (code?: number, reason?: string) => void);
+        if (event === 'error') this.errorListeners.push(listener as (err: unknown) => void);
     }
 
     close(): void {
@@ -122,10 +128,11 @@ describe('RemoteMeshServer', () => {
     });
 
     it('matches wildcard channel subscriptions (e.g. WORKS.INTAKE.*)', () => {
-        let busCallback: ((msg: any) => void) | null = null;
+        let busCallback: ((msg: { address?: { channel: string }; payload?: unknown }) => void) | null = null;
         const bus = {
-            on: vi.fn(({ callback }) => {
+            on: vi.fn(({ callback }: { callback: (msg: { address?: { channel: string }; payload?: unknown }) => void }) => {
                 busCallback = callback;
+                return () => {};
             }),
             send: vi.fn(),
             request: vi.fn(),
@@ -135,12 +142,10 @@ describe('RemoteMeshServer', () => {
         const socket = new MockSocket();
         server.handleConnection(socket);
 
-        // Client subscribes with wildcard prefix
         socket.receiveMessage({ t: 'SUB', channel: 'WORKS.INTAKE.*' });
 
         expect(bus.on).toHaveBeenCalled();
 
-        // Server bus emits specific channel matching wildcard
         busCallback!({
             address: { channel: 'WORKS.INTAKE.COMPLETED' },
             payload: { intakeId: 'item-10' },
@@ -155,10 +160,11 @@ describe('RemoteMeshServer', () => {
     });
 
     it('enforces multi-tenant isolation by default (filters events belonging to other users)', () => {
-        let busCallback: ((msg: any) => void) | null = null;
+        let busCallback: ((msg: { channel?: string; payload?: unknown }) => void) | null = null;
         const bus = {
-            on: vi.fn(({ callback }) => {
+            on: vi.fn(({ callback }: { callback: (msg: { channel?: string; payload?: unknown }) => void }) => {
                 busCallback = callback;
+                return () => {};
             }),
             send: vi.fn(),
             request: vi.fn(),
@@ -167,27 +173,22 @@ describe('RemoteMeshServer', () => {
         const server = new RemoteMeshServer({ bus });
         const userSocket = new MockSocket();
 
-        // Connected user is u-1
         server.handleConnection(userSocket, { userId: 'u-1' });
 
         userSocket.receiveMessage({ t: 'SUB', channel: 'INTAKE.UPDATE' });
 
-        // Event for user u-2 emitted on bus
         busCallback!({
             channel: 'INTAKE.UPDATE',
             payload: { userId: 'u-2', secretInfo: 'private' },
         });
 
-        // u-1 must NOT receive u-2's event
         expect(userSocket.sent.length).toBe(0);
 
-        // Event for user u-1 emitted on bus
         busCallback!({
             channel: 'INTAKE.UPDATE',
             payload: { userId: 'u-1', secretInfo: 'for-me' },
         });
 
-        // u-1 receives their event
         expect(userSocket.sent.length).toBe(1);
         expect(JSON.parse(userSocket.sent[0])).toEqual({
             t: 'MSG',

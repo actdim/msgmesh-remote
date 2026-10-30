@@ -9,12 +9,20 @@ import {
  * Creates an in-memory linked duplex socket pair.
  */
 function createSocketPair(): { clientSocket: RemoteSocket; serverSocket: RemoteSocket } {
-    let clientListeners: { message: ((d: unknown) => void)[]; close: (() => void)[]; error: ((e: unknown) => void)[] } = {
+    const clientListeners: {
+        message: ((d: unknown) => void)[];
+        close: ((code?: number, reason?: string) => void)[];
+        error: ((e: unknown) => void)[];
+    } = {
         message: [],
         close: [],
         error: [],
     };
-    let serverListeners: { message: ((d: unknown) => void)[]; close: (() => void)[]; error: ((e: unknown) => void)[] } = {
+    const serverListeners: {
+        message: ((d: unknown) => void)[];
+        close: ((code?: number, reason?: string) => void)[];
+        error: ((e: unknown) => void)[];
+    } = {
         message: [],
         close: [],
         error: [],
@@ -26,8 +34,13 @@ function createSocketPair(): { clientSocket: RemoteSocket; serverSocket: RemoteS
                 for (const l of serverListeners.message) l(data);
             }, 0);
         },
-        on: (event: 'message' | 'close' | 'error', listener: any) => {
-            clientListeners[event].push(listener);
+        on: (
+            event: 'message' | 'close' | 'error',
+            listener: ((d: unknown) => void) | ((code?: number, reason?: string) => void) | ((e: unknown) => void),
+        ) => {
+            if (event === 'message') clientListeners.message.push(listener as (d: unknown) => void);
+            if (event === 'close') clientListeners.close.push(listener as (code?: number, reason?: string) => void);
+            if (event === 'error') clientListeners.error.push(listener as (e: unknown) => void);
         },
         close: () => {
             setTimeout(() => {
@@ -43,8 +56,13 @@ function createSocketPair(): { clientSocket: RemoteSocket; serverSocket: RemoteS
                 for (const l of clientListeners.message) l(data);
             }, 0);
         },
-        on: (event: 'message' | 'close' | 'error', listener: any) => {
-            serverListeners[event].push(listener);
+        on: (
+            event: 'message' | 'close' | 'error',
+            listener: ((d: unknown) => void) | ((code?: number, reason?: string) => void) | ((e: unknown) => void),
+        ) => {
+            if (event === 'message') serverListeners.message.push(listener as (d: unknown) => void);
+            if (event === 'close') serverListeners.close.push(listener as (code?: number, reason?: string) => void);
+            if (event === 'error') serverListeners.error.push(listener as (e: unknown) => void);
         },
         close: () => {
             setTimeout(() => {
@@ -61,13 +79,13 @@ describe('End-to-End Integration: RemoteMeshClient <-> RemoteMeshServer', () => 
     it('executes full RPC request/response cycle over duplex connection', async () => {
         const { clientSocket, serverSocket } = createSocketPair();
 
-        // Server-side bus
         const serverBus = {
             on: () => {},
             send: () => {},
-            request: async (msg: any) => {
+            request: async (msg: { channel: string; payload?: unknown }) => {
                 if (msg.channel === 'CAD.GET_DOCUMENT') {
-                    return { docId: msg.payload?.id, name: 'Main Floorplan', version: 3 };
+                    const payload = msg.payload as { id: string } | undefined;
+                    return { docId: payload?.id, name: 'Main Floorplan', version: 3 };
                 }
                 throw new Error('Unknown channel');
             },
@@ -100,9 +118,9 @@ describe('End-to-End Integration: RemoteMeshClient <-> RemoteMeshServer', () => 
     it('propagates server pub-sub events to subscribed client', async () => {
         const { clientSocket, serverSocket } = createSocketPair();
 
-        let serverBusListener: ((msg: any) => void) | null = null;
+        let serverBusListener: ((msg: { channel: string; payload?: unknown }) => void) | null = null;
         const serverBus = {
-            on: (params: any) => {
+            on: (params: { channel: string; callback: (msg: { channel: string; payload?: unknown }) => void }) => {
                 if (params.channel === 'CAD.SCENE_DELTA') {
                     serverBusListener = params.callback;
                 }
@@ -118,7 +136,7 @@ describe('End-to-End Integration: RemoteMeshClient <-> RemoteMeshServer', () => 
             socketFactory: () => clientSocket,
         });
 
-        const receivedDeltas: any[] = [];
+        const receivedDeltas: unknown[] = [];
         client.onMessage((msg) => {
             if (msg.channel === 'CAD.SCENE_DELTA') {
                 receivedDeltas.push(msg.payload);
@@ -128,18 +146,15 @@ describe('End-to-End Integration: RemoteMeshClient <-> RemoteMeshServer', () => 
         client.connect();
         client.subscribe('CAD.SCENE_DELTA');
 
-        // Allow SUB frame to be delivered to server
         await new Promise((r) => setTimeout(r, 20));
 
         expect(serverBusListener).toBeDefined();
 
-        // Server bus emits delta
         serverBusListener!({
             channel: 'CAD.SCENE_DELTA',
             payload: { addedObjects: ['rect-1'], timestamp: 123456 },
         });
 
-        // Allow message to reach client
         await new Promise((r) => setTimeout(r, 20));
 
         expect(receivedDeltas.length).toBe(1);
@@ -153,12 +168,12 @@ describe('End-to-End Integration: RemoteMeshClient <-> RemoteMeshServer', () => 
     });
 
     it('buffers offline messages and delivers them once connection is established', async () => {
-        let currentSockets = createSocketPair();
+        const currentSockets = createSocketPair();
 
-        const serverSentMessages: any[] = [];
+        const serverSentMessages: Array<{ channel: string; topic?: string; payload?: unknown }> = [];
         const serverBus = {
             on: () => {},
-            send: (msg: any) => {
+            send: (msg: { channel: string; topic?: string; payload?: unknown }) => {
                 serverSentMessages.push(msg);
             },
             request: async () => {},
@@ -170,13 +185,11 @@ describe('End-to-End Integration: RemoteMeshClient <-> RemoteMeshServer', () => 
             socketFactory: () => currentSockets.clientSocket,
         });
 
-        // Send while client is not connected
         client.send('CAD.OBJECT_MUTATION', { id: 'obj-1', color: 'red' });
         client.send('CAD.OBJECT_MUTATION', { id: 'obj-2', color: 'blue' });
 
         expect(serverSentMessages.length).toBe(0);
 
-        // Connect now
         server.handleConnection(currentSockets.serverSocket);
         client.connect();
 

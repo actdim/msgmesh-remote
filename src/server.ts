@@ -7,6 +7,7 @@ import {
     type RemoteMsgFrame,
     type RemoteReqFrame,
     type RemoteAuthFrame,
+    type RemoteBusLike,
 } from './types';
 import {
     defaultCodec,
@@ -23,14 +24,14 @@ export interface RemoteConnectionContext {
     metadata?: Record<string, unknown>;
 }
 
-export interface RemoteServerOptions {
-    bus: any;
+export interface RemoteServerOptions<TChannel extends string = string> {
+    bus: RemoteBusLike<TChannel>;
     codec?: FrameCodec;
     onAuthenticate?: (
         token: string,
         context: RemoteConnectionContext,
     ) => Promise<{ userId?: string; metadata?: Record<string, unknown> } | boolean | null> | { userId?: string; metadata?: Record<string, unknown> } | boolean | null;
-    authorize?: (context: RemoteConnectionContext, frame: RemoteFrame) => boolean | Promise<boolean>;
+    authorize?: (context: RemoteConnectionContext, frame: RemoteFrame<TChannel>) => boolean | Promise<boolean>;
     filterEvent?: (
         context: RemoteConnectionContext,
         channel: string,
@@ -71,7 +72,7 @@ function matchGroupPattern(pattern?: string, group?: string): boolean {
     return pattern === group;
 }
 
-export class RemoteClientSession {
+export class RemoteClientSession<TChannel extends string = string> {
     public readonly context: RemoteConnectionContext;
     private readonly subscriptions = new Map<string, SubscriptionRecord>();
     private readonly busSubscriptions = new Map<string, () => void>();
@@ -80,7 +81,7 @@ export class RemoteClientSession {
     constructor(
         public readonly socket: RemoteSocket,
         context: Partial<RemoteConnectionContext> | undefined,
-        private readonly server: RemoteMeshServer,
+        private readonly server: RemoteMeshServer<TChannel>,
         private readonly codec: FrameCodec,
     ) {
         this.context = {
@@ -90,10 +91,10 @@ export class RemoteClientSession {
         };
     }
 
-    public send(frame: RemoteFrame): void {
+    public send(frame: RemoteFrame<TChannel>): void {
         if (this.isClosed) return;
         try {
-            const encoded = this.codec.encode(frame);
+            const encoded = this.codec.encode(frame as RemoteFrame);
             this.socket.send(encoded);
         } catch (err) {
             this.server.options.logger?.error?.('Failed to send frame to socket:', err);
@@ -113,7 +114,7 @@ export class RemoteClientSession {
         return false;
     }
 
-    public async handleFrame(frame: RemoteFrame): Promise<void> {
+    public async handleFrame(frame: RemoteFrame<TChannel>): Promise<void> {
         if (frame.t === 'AUTH') {
             await this.handleAuth(frame);
             return;
@@ -187,7 +188,7 @@ export class RemoteClientSession {
         }
     }
 
-    private handleSub(frame: RemoteSubFrame): void {
+    private handleSub(frame: RemoteSubFrame<TChannel>): void {
         const key = `${frame.channel}::${frame.group ?? ''}::${frame.topic ?? ''}`;
         this.subscriptions.set(key, {
             channel: frame.channel,
@@ -195,7 +196,6 @@ export class RemoteClientSession {
             topic: frame.topic,
         });
 
-        // Determine base channel or prefix to listen to on server bus
         const busChannel = frame.channel.endsWith('*') ? frame.channel.slice(0, -1) : frame.channel;
 
         if (!this.busSubscriptions.has(busChannel)) {
@@ -206,18 +206,17 @@ export class RemoteClientSession {
                 bus.on({
                     channel: busChannel,
                     options: { abortSignal: abortController.signal },
-                    callback: (msg: any) => {
+                    callback: (msg) => {
                         const eventChannel = msg?.address?.channel || msg?.channel || busChannel;
                         const eventTopic = msg?.address?.topic || msg?.topic;
                         const eventGroup = msg?.address?.group || msg?.group;
                         const eventPayload = msg?.payload !== undefined ? msg.payload : msg;
 
                         if (this.isSubscribed(eventChannel, eventTopic, eventGroup)) {
-                            // Check custom or default security event filter
                             if (!this.canReceiveEvent(eventChannel, eventPayload, eventTopic, eventGroup)) {
                                 return;
                             }
-                            this.send(createMsgFrame(eventChannel, eventPayload, eventTopic, eventGroup));
+                            this.send(createMsgFrame(eventChannel, eventPayload, eventTopic, eventGroup) as RemoteFrame<TChannel>);
                         }
                     },
                 });
@@ -234,7 +233,6 @@ export class RemoteClientSession {
             return this.server.options.filterEvent(this.context, channel, payload, topic, group);
         }
 
-        // Built-in multi-tenant isolation guard: if payload carries userId or ownerUserId, verify it matches
         if (payload && typeof payload === 'object') {
             const p = payload as Record<string, unknown>;
             const owner = p.userId ?? p.ownerUserId;
@@ -246,7 +244,7 @@ export class RemoteClientSession {
         return true;
     }
 
-    private handleUnsub(frame: RemoteUnsubFrame): void {
+    private handleUnsub(frame: RemoteUnsubFrame<TChannel>): void {
         const key = `${frame.channel}::${frame.group ?? ''}::${frame.topic ?? ''}`;
         this.subscriptions.delete(key);
 
@@ -270,7 +268,7 @@ export class RemoteClientSession {
         }
     }
 
-    private handleMsg(frame: RemoteMsgFrame): void {
+    private handleMsg(frame: RemoteMsgFrame<TChannel>): void {
         const bus = this.server.options.bus;
         if (typeof bus?.send === 'function') {
             void bus.send({
@@ -282,7 +280,7 @@ export class RemoteClientSession {
         }
     }
 
-    private async handleReq(frame: RemoteReqFrame): Promise<void> {
+    private async handleReq(frame: RemoteReqFrame<TChannel>): Promise<void> {
         const bus = this.server.options.bus;
         if (!bus || typeof bus.request !== 'function') {
             this.send(createResFrame(frame.id, undefined, { message: 'Server bus has no request provider' }));
@@ -296,12 +294,15 @@ export class RemoteClientSession {
                 topic: frame.topic,
                 payload: frame.payload,
             });
-            const payload = response?.payload !== undefined ? response.payload : response;
+            const payload = typeof response === 'object' && response !== null && 'payload' in response
+                ? (response as { payload?: unknown }).payload
+                : response;
             this.send(createResFrame(frame.id, payload));
         } catch (err: unknown) {
+            const errObj = typeof err === 'object' && err !== null ? (err as Record<string, unknown>) : {};
             const errorPayload = err instanceof Error
-                ? { message: err.message, name: err.name, ...(err as any) }
-                : (typeof err === 'object' && err !== null ? err : { message: String(err) });
+                ? { message: err.message, name: err.name, ...errObj }
+                : (typeof err === 'object' && err !== null ? errObj : { message: String(err) });
             this.send(createResFrame(frame.id, undefined, errorPayload));
         }
     }
@@ -322,24 +323,24 @@ export class RemoteClientSession {
     }
 }
 
-export class RemoteMeshServer {
+export class RemoteMeshServer<TChannel extends string = string> {
     public readonly codec: FrameCodec;
-    private readonly sessions = new Set<RemoteClientSession>();
+    private readonly sessions = new Set<RemoteClientSession<TChannel>>();
 
-    constructor(public readonly options: RemoteServerOptions) {
+    constructor(public readonly options: RemoteServerOptions<TChannel>) {
         this.codec = options.codec || defaultCodec;
     }
 
     public handleConnection(
         socket: RemoteSocket,
         context?: Partial<RemoteConnectionContext>,
-    ): RemoteClientSession {
-        const session = new RemoteClientSession(socket, context, this, this.codec);
+    ): RemoteClientSession<TChannel> {
+        const session = new RemoteClientSession<TChannel>(socket, context, this, this.codec);
         this.sessions.add(session);
 
         socket.on('message', (raw: unknown) => {
             try {
-                const frame = this.codec.decode(raw as string | Uint8Array);
+                const frame = this.codec.decode(raw as string | Uint8Array) as RemoteFrame<TChannel>;
                 void session.handleFrame(frame);
             } catch (err) {
                 this.options.logger?.warn?.('Failed to parse frame from client socket:', err);
@@ -357,11 +358,11 @@ export class RemoteMeshServer {
         return session;
     }
 
-    public broadcast(channel: string, payload?: unknown, topic?: string, group?: string): void {
+    public broadcast(channel: TChannel, payload?: unknown, topic?: string, group?: string): void {
         const frame = createMsgFrame(channel, payload, topic, group);
         for (const session of this.sessions) {
             if (session.isSubscribed(channel, topic, group)) {
-                session.send(frame);
+                session.send(frame as RemoteFrame<TChannel>);
             }
         }
     }

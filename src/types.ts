@@ -16,9 +16,9 @@ export type RemoteFrameType =
 /**
  * Client-to-server subscription request for a channel, group, or topic.
  */
-export type RemoteSubFrame = {
+export type RemoteSubFrame<TChannel extends string = string> = {
     t: 'SUB';
-    channel: string;
+    channel: TChannel;
     group?: string;
     topic?: string;
 };
@@ -26,9 +26,9 @@ export type RemoteSubFrame = {
 /**
  * Client-to-server unsubscription request.
  */
-export type RemoteUnsubFrame = {
+export type RemoteUnsubFrame<TChannel extends string = string> = {
     t: 'UNSUB';
-    channel: string;
+    channel: TChannel;
     group?: string;
     topic?: string;
 };
@@ -36,34 +36,34 @@ export type RemoteUnsubFrame = {
 /**
  * One-way fire-and-forget message (both directions).
  */
-export type RemoteMsgFrame = {
+export type RemoteMsgFrame<TChannel extends string = string, TPayload = unknown> = {
     t: 'MSG';
-    channel: string;
+    channel: TChannel;
     group?: string;
     topic?: string;
-    payload?: unknown;
+    payload?: TPayload;
 };
 
 /**
  * Correlated RPC request frame.
  */
-export type RemoteReqFrame = {
+export type RemoteReqFrame<TChannel extends string = string, TPayload = unknown> = {
     t: 'REQ';
     id: string;
-    channel: string;
+    channel: TChannel;
     group?: string;
     topic?: string;
-    payload?: unknown;
+    payload?: TPayload;
 };
 
 /**
  * Correlated RPC response frame.
  */
-export type RemoteResFrame = {
+export type RemoteResFrame<TPayload = unknown, TError = unknown> = {
     t: 'RES';
     id: string;
-    payload?: unknown;
-    error?: unknown;
+    payload?: TPayload;
+    error?: TError;
 };
 
 /**
@@ -109,12 +109,12 @@ export type RemoteAuthFailFrame = {
 /**
  * Union of all valid remote wire frames.
  */
-export type RemoteFrame =
-    | RemoteSubFrame
-    | RemoteUnsubFrame
-    | RemoteMsgFrame
-    | RemoteReqFrame
-    | RemoteResFrame
+export type RemoteFrame<TChannel extends string = string, TPayload = unknown, TError = unknown> =
+    | RemoteSubFrame<TChannel>
+    | RemoteUnsubFrame<TChannel>
+    | RemoteMsgFrame<TChannel, TPayload>
+    | RemoteReqFrame<TChannel, TPayload>
+    | RemoteResFrame<TPayload, TError>
     | RemotePingFrame
     | RemotePongFrame
     | RemoteAuthFrame
@@ -138,4 +138,45 @@ export interface RemoteSocket {
     on(event: 'close', listener: (code?: number, reason?: string) => void): void;
     on(event: 'error', listener: (err: unknown) => void): void;
     close(code?: number, reason?: string): void;
+}
+
+/**
+ * Minimal contract for an in-process message bus compatible with @actdim/msgmesh.
+ */
+export interface RemoteBusLike<TChannel extends string = string> {
+    send?(msg: {
+        channel: TChannel;
+        group?: string;
+        topic?: string;
+        payload?: unknown;
+    }): Promise<unknown> | void;
+    request?(msg: {
+        channel: TChannel;
+        group?: string;
+        topic?: string;
+        payload?: unknown;
+    }): Promise<unknown>;
+    provide?(params: {
+        channel: TChannel;
+        group?: string;
+        callback: (inMsg: {
+            address?: { channel: string; group?: string; topic?: string };
+            channel?: string;
+            topic?: string;
+            group?: string;
+            payload?: unknown;
+        }) => Promise<unknown> | unknown;
+    }): (() => void) | void;
+    on?(params: {
+        channel: string;
+        group?: string;
+        options?: { abortSignal?: AbortSignal };
+        callback: (msg: {
+            address?: { channel: string; group?: string; topic?: string };
+            channel?: string;
+            group?: string;
+            topic?: string;
+            payload?: unknown;
+        }) => void;
+    }): (() => void) | void;
 }

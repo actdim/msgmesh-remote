@@ -158,37 +158,60 @@ export class JsonFrameCodec implements FrameCodec {
 
 export const defaultCodec = new JsonFrameCodec();
 
-export function createSubFrame(channel: string, topic?: string, group?: string): RemoteSubFrame {
-    const f: RemoteSubFrame = { t: 'SUB', channel };
+export function createSubFrame<TChannel extends string = string>(
+    channel: TChannel,
+    topic?: string,
+    group?: string,
+): RemoteSubFrame<TChannel> {
+    const f: RemoteSubFrame<TChannel> = { t: 'SUB', channel };
     if (topic !== undefined) f.topic = topic;
     if (group !== undefined) f.group = group;
     return f;
 }
 
-export function createUnsubFrame(channel: string, topic?: string, group?: string): RemoteUnsubFrame {
-    const f: RemoteUnsubFrame = { t: 'UNSUB', channel };
+export function createUnsubFrame<TChannel extends string = string>(
+    channel: TChannel,
+    topic?: string,
+    group?: string,
+): RemoteUnsubFrame<TChannel> {
+    const f: RemoteUnsubFrame<TChannel> = { t: 'UNSUB', channel };
     if (topic !== undefined) f.topic = topic;
     if (group !== undefined) f.group = group;
     return f;
 }
 
-export function createMsgFrame(channel: string, payload?: unknown, topic?: string, group?: string): RemoteMsgFrame {
-    const f: RemoteMsgFrame = { t: 'MSG', channel };
+export function createMsgFrame<TChannel extends string = string, TPayload = unknown>(
+    channel: TChannel,
+    payload?: TPayload,
+    topic?: string,
+    group?: string,
+): RemoteMsgFrame<TChannel, TPayload> {
+    const f: RemoteMsgFrame<TChannel, TPayload> = { t: 'MSG', channel };
     if (payload !== undefined) f.payload = payload;
     if (topic !== undefined) f.topic = topic;
     if (group !== undefined) f.group = group;
     return f;
 }
 
-export function createReqFrame(id: string, channel: string, payload?: unknown, topic?: string, group?: string): RemoteReqFrame {
-    const f: RemoteReqFrame = { t: 'REQ', id, channel };
+export function createReqFrame<TChannel extends string = string, TPayload = unknown>(
+    id: string,
+    channel: TChannel,
+    payload?: TPayload,
+    topic?: string,
+    group?: string,
+): RemoteReqFrame<TChannel, TPayload> {
+    const f: RemoteReqFrame<TChannel, TPayload> = { t: 'REQ', id, channel };
     if (payload !== undefined) f.payload = payload;
     if (topic !== undefined) f.topic = topic;
     if (group !== undefined) f.group = group;
     return f;
 }
 
-export function createResFrame(id: string, payload?: unknown, error?: unknown): RemoteResFrame {
+export function createResFrame<TPayload = unknown, TError = unknown>(
+    id: string,
+    payload?: TPayload,
+    error?: TError,
+): RemoteResFrame<TPayload, TError> {
     if (error !== undefined) {
         return { t: 'RES', id, error };
     }

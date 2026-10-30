@@ -3,6 +3,7 @@ import {
     type FrameCodec,
     type RemoteSocket,
     type RemoteMsgFrame,
+    type RemoteBusLike,
 } from './types';
 import {
     defaultCodec,
@@ -36,16 +37,16 @@ export interface RemoteClientOptions {
     };
 }
 
-export interface RemoteSubscriptionItem {
-    channel: string;
+export interface RemoteSubscriptionItem<TChannel extends string = string> {
+    channel: TChannel;
     topic?: string;
     group?: string;
 }
 
-export interface RemoteBusBridgeConfig {
-    remoteRequests?: string[] | ((channel: string) => boolean);
-    sendToRemote?: string[] | ((channel: string) => boolean);
-    remoteSubscriptions?: RemoteSubscriptionItem[];
+export interface RemoteBusBridgeConfig<TChannel extends string = string> {
+    remoteRequests?: TChannel[] | ((channel: string) => boolean);
+    sendToRemote?: TChannel[] | ((channel: string) => boolean);
+    remoteSubscriptions?: RemoteSubscriptionItem<TChannel>[];
 }
 
 interface PendingRequest {
@@ -61,12 +62,12 @@ interface PendingAuth {
     timer: ReturnType<typeof setTimeout>;
 }
 
-export class RemoteMeshClient {
+export class RemoteMeshClient<TChannel extends string = string> {
     public readonly codec: FrameCodec;
     private state: ClientConnectionState = 'CLOSED';
     private socket: WebSocket | RemoteSocket | null = null;
-    private readonly subscriptions = new Map<string, RemoteSubscriptionItem>();
-    private readonly offlineQueue: RemoteMsgFrame[] = [];
+    private readonly subscriptions = new Map<string, RemoteSubscriptionItem<TChannel>>();
+    private readonly offlineQueue: RemoteMsgFrame<TChannel>[] = [];
     private readonly pendingRequests = new Map<string, PendingRequest>();
     private pendingAuth: PendingAuth | null = null;
 
@@ -77,7 +78,7 @@ export class RemoteMeshClient {
     private isExplicitlyClosed = false;
 
     private readonly stateListeners = new Set<(state: ClientConnectionState) => void>();
-    private readonly messageListeners = new Set<(frame: RemoteMsgFrame) => void>();
+    private readonly messageListeners = new Set<(frame: RemoteMsgFrame<TChannel>) => void>();
 
     constructor(public readonly options: RemoteClientOptions) {
         this.codec = options.codec || defaultCodec;
@@ -92,7 +93,7 @@ export class RemoteMeshClient {
         return () => this.stateListeners.delete(listener);
     }
 
-    public onMessage(listener: (frame: RemoteMsgFrame) => void): () => void {
+    public onMessage(listener: (frame: RemoteMsgFrame<TChannel>) => void): () => void {
         this.messageListeners.add(listener);
         return () => this.messageListeners.delete(listener);
     }
@@ -130,7 +131,6 @@ export class RemoteMeshClient {
             this.setState('OPEN');
             this.startHeartbeat();
 
-            // Perform in-band authentication if token or tokenGetter is configured
             const token = this.options.token ?? (await this.options.tokenGetter?.());
             if (token) {
                 this.sendRaw(createAuthFrame(token));
@@ -143,7 +143,7 @@ export class RemoteMeshClient {
         const handleMessage = (data: unknown) => {
             try {
                 const raw = data instanceof MessageEvent ? data.data : data;
-                const frame = this.codec.decode(raw as string | Uint8Array);
+                const frame = this.codec.decode(raw as string | Uint8Array) as RemoteFrame<TChannel>;
                 this.handleIncomingFrame(frame);
             } catch (err) {
                 this.options.logger?.warn?.('Failed to decode incoming frame:', err);
@@ -176,7 +176,7 @@ export class RemoteMeshClient {
         }
     }
 
-    private handleIncomingFrame(frame: RemoteFrame): void {
+    private handleIncomingFrame(frame: RemoteFrame<TChannel>): void {
         switch (frame.t) {
             case 'PONG':
                 this.clearHeartbeatTimeout();
@@ -321,7 +321,7 @@ export class RemoteMeshClient {
         }
     }
 
-    public subscribe(channel: string, topic?: string, group?: string): void {
+    public subscribe(channel: TChannel, topic?: string, group?: string): void {
         const key = `${channel}::${group ?? ''}::${topic ?? ''}`;
         this.subscriptions.set(key, { channel, topic, group });
 
@@ -330,7 +330,7 @@ export class RemoteMeshClient {
         }
     }
 
-    public unsubscribe(channel: string, topic?: string, group?: string): void {
+    public unsubscribe(channel: TChannel, topic?: string, group?: string): void {
         const key = `${channel}::${group ?? ''}::${topic ?? ''}`;
         this.subscriptions.delete(key);
 
@@ -339,7 +339,7 @@ export class RemoteMeshClient {
         }
     }
 
-    public send(channel: string, payload?: unknown, topic?: string, group?: string): void {
+    public send(channel: TChannel, payload?: unknown, topic?: string, group?: string): void {
         const frame = createMsgFrame(channel, payload, topic, group);
 
         if (this.state === 'OPEN') {
@@ -347,7 +347,7 @@ export class RemoteMeshClient {
         } else {
             const maxQueue = this.options.maxOfflineQueueSize ?? 200;
             if (this.offlineQueue.length < maxQueue) {
-                this.offlineQueue.push(frame);
+                this.offlineQueue.push(frame as RemoteMsgFrame<TChannel>);
             } else {
                 this.options.logger?.warn?.('Offline message queue limit reached; dropping message');
             }
@@ -355,7 +355,7 @@ export class RemoteMeshClient {
     }
 
     public async request<T = unknown>(
-        channel: string,
+        channel: TChannel,
         payload?: unknown,
         options?: { topic?: string; group?: string; timeout?: number },
     ): Promise<T> {
@@ -442,7 +442,10 @@ export class RemoteMeshClient {
     /**
      * High-level declarative bridge between in-memory MsgBus and RemoteMeshClient.
      */
-    public attachToBus(bus: any, options?: RemoteBusBridgeConfig): () => void {
+    public attachToBus(
+        bus: RemoteBusLike<TChannel>,
+        options?: RemoteBusBridgeConfig<TChannel>,
+    ): () => void {
         return bridgeRemoteBus(bus, this, options);
     }
 }
@@ -450,19 +453,17 @@ export class RemoteMeshClient {
 /**
  * Connects an in-memory MsgBus with a RemoteMeshClient declaratively.
  */
-export function bridgeRemoteBus(
-    bus: any,
-    client: RemoteMeshClient,
-    config?: RemoteBusBridgeConfig,
+export function bridgeRemoteBus<TChannel extends string = string>(
+    bus: RemoteBusLike<TChannel>,
+    client: RemoteMeshClient<TChannel>,
+    config?: RemoteBusBridgeConfig<TChannel>,
 ): () => void {
-    // 1. Subscribe to remote events specified in config
     if (config?.remoteSubscriptions) {
         for (const sub of config.remoteSubscriptions) {
             client.subscribe(sub.channel, sub.topic, sub.group);
         }
     }
 
-    // 2. Forward incoming remote MSG frames into local bus
     const unsubIncoming = client.onMessage((frame) => {
         if (typeof bus?.send === 'function') {
             void bus.send({
@@ -474,13 +475,12 @@ export function bridgeRemoteBus(
         }
     });
 
-    // 3. Register request providers on local bus
     const providers: Array<() => void> = [];
     if (typeof bus?.provide === 'function' && Array.isArray(config?.remoteRequests)) {
         for (const channel of config.remoteRequests) {
             const unsubProvider = bus.provide({
                 channel,
-                callback: async (inMsg: any) => {
+                callback: async (inMsg) => {
                     const topic = inMsg?.address?.topic || inMsg?.topic;
                     const group = inMsg?.address?.group || inMsg?.group;
                     return client.request(channel, inMsg?.payload, { topic, group });
