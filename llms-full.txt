@@ -1,0 +1,1715 @@
+# @actdim/msgmesh-remote - Full Documentation Context
+
+> **Bidirectional remote transport, WebSocket bridge, and reconnect orchestration for `@actdim/msgmesh`**
+
+---
+
+## Document: README.md (Overview)
+
+# @actdim/msgmesh-remote
+
+> **Bidirectional remote transport, WebSocket bridge, and reconnect orchestration for `@actdim/msgmesh`**
+
+[![npm version](https://img.shields.io/npm/v/@actdim/msgmesh-remote.svg)](https://www.npmjs.com/package/@actdim/msgmesh-remote)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9+-blue.svg)](https://www.typescriptlang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+---
+
+## What is MsgMesh Remote?
+
+**`@actdim/msgmesh-remote`** carries [`@actdim/msgmesh`](https://www.npmjs.com/package/@actdim/msgmesh) messages across a network boundary. A client bus (browser, WebView) and a server bus exchange the same `{ channel, group, topic, payload }` messages over one duplex socket, using a small typed JSON frame protocol.
+
+### The Problem It Solves
+- **Two buses, one app**: the UI talks to a local msgmesh bus, the server publishes on its own; something has to move events and RPC calls between them.
+- **Dead mobile sockets**: WebViews (.NET MAUI, iOS WKWebView, Android WebView) can leave a WebSocket half-open after the app is suspended, with no `close` event.
+- **Lost state on reconnect**: subscriptions and messages sent during a short outage vanish unless the transport replays them.
+
+### The Output You Get
+- **Full-Duplex Wire Protocol**: strongly typed frames `SUB`, `UNSUB`, `MSG`, `REQ`, `RES`, `PING`, `PONG`, `AUTH`, `AUTH_OK`, `AUTH_FAIL`, with a validating JSON codec and a pluggable `FrameCodec`.
+- **Framework-Agnostic Server**: `RemoteMeshServer` works with any socket that matches the duck-typed `RemoteSocket` contract - `ws` / `@fastify/websocket`, or a custom implementation. The frames are plain JSON, so other server stacks can implement the same protocol.
+- **Resilient Client**: `RemoteMeshClient` sends a heartbeat every 15 s and treats a `PONG` missing for 5 s as a dead socket, then reconnects with exponential backoff and jitter.
+- **Auto-Resubscription**: active channel/topic subscriptions are replayed after every reconnect.
+- **Offline Message Buffer**: bounded queue (200 by default) for outbound fire-and-forget messages sent while disconnected.
+- **RPC Correlation**: `client.request()` maps requests to correlated responses with timeouts; `bridgeRemoteBus` exposes remote channels as local `bus.request()` providers.
+- **Security Hooks**: handshake context, in-band `AUTH` / token refresh (`client.authenticate(token)`), per-frame `authorize`, per-session `filterEvent` with a default owner-based tenant filter.
+
+---
+
+## Installation
+
+```bash
+pnpm add @actdim/msgmesh-remote @actdim/msgmesh rxjs
+```
+
+Peer dependencies: `@actdim/msgmesh >=1.12.0`, `rxjs >=7.8.0`. ESM only.
+
+| Entry point | Contents |
+|---|---|
+| `@actdim/msgmesh-remote/client` | `RemoteMeshClient`, `bridgeRemoteBus` |
+| `@actdim/msgmesh-remote/server` | `RemoteMeshServer`, `RemoteClientSession` |
+| `@actdim/msgmesh-remote/protocol` | `JsonFrameCodec`, `defaultCodec`, `validateFrame`, `create*Frame` factories, error classes |
+| `@actdim/msgmesh-remote` | All of the above plus the type contracts |
+
+---
+
+## Quick Start
+
+### Server (Node.js, `@fastify/websocket`)
+
+```typescript
+import { RemoteMeshServer, type RemoteSocket } from '@actdim/msgmesh-remote/server';
+
+const remoteServer = new RemoteMeshServer({
+    bus: serverBus, // your msgmesh bus
+    onAuthenticate: async (token) => {
+        const user = await verifyToken(token);
+        return user ? { userId: user.id } : null;
+    },
+});
+
+fastify.get('/api/v1/ws', { websocket: true }, (socket) => {
+    remoteServer.handleConnection(socket as unknown as RemoteSocket);
+});
+
+// server code publishes as usual; subscribed clients receive it
+await serverBus.send({ channel: 'JOBS.STATUS', topic: jobId, payload: { jobId, progress: 55 } });
+```
+
+### Client (browser / WebView)
+
+```typescript
+import { RemoteMeshClient, bridgeRemoteBus, type RemoteBusLike } from '@actdim/msgmesh-remote/client';
+
+const client = new RemoteMeshClient({
+    url: 'wss://example.com/api/v1/ws',
+    tokenGetter: () => getAccessToken(),
+});
+
+// incoming events are re-published on the local bus
+const unbridge = bridgeRemoteBus(appBus as unknown as RemoteBusLike, client, {
+    remoteSubscriptions: [{ channel: 'WORKS.INTAKE.*' }],
+});
+
+client.connect();
+client.subscribe('JOBS.STATUS', jobId);
+
+appBus.on({ channel: 'JOBS.STATUS', topic: jobId, callback: (msg) => render(msg.payload) });
+
+// direct RPC to the server bus
+const doc = await client.request<{ name: string }>('CAD.GET_DOCUMENT', { id: 'doc-001' });
+```
+
+`serverBus`, `appBus`, `verifyToken`, `getAccessToken` and `render` are application code. With a msgmesh server bus, wildcard channel subscriptions such as `WORKS.INTAKE.*` need `resolveChannels` on the server - see the [Integration Guide](./docs/topic--04-integration-guide.md).
+
+---
+
+## Documentation Index
+
+Online: **https://actdim.github.io/msgmesh-remote/**
+
+| Section | Description |
+|---|---|
+| [**01. Overview & Key Advantages**](./docs/topic--01-overview-and-advantages.md) | What the package is, where it fits, why it is built this way |
+| [**02. Core Concepts**](./docs/topic--02-core-concepts.md) | Addressing, frames, codec, client lifecycle, heartbeat, reconnect, auth and filtering |
+| [**03. Architecture & Wiring**](./docs/topic--03-architecture-and-wiring.md) | Sequence diagrams for connect, RPC, pub/sub, heartbeat; the declarative bus bridge |
+| [**04. Integration Guide**](./docs/topic--04-integration-guide.md) | Installing, wiring a Fastify server and a browser client, testing without a network |
+| [**05. API Reference**](./docs/topic--05-api-reference.md) | Every public export per entry point |
+| [Architecture](./docs/topic--architecture.md) / [Domain Model](./docs/topic--domain-model.md) | System summary and frame contracts |
+| [Setup & Workflow](./docs/topic--setup-and-workflow.md) | Build, test, docs scripts and monorepo versioning |
+
+---
+
+## AI Coding Assistants (Cursor, Claude Code, Copilot, Antigravity)
+
+Point your agent at the bundled LLM documentation in your project's `AGENTS.md`, `CLAUDE.md` or `.cursorrules`:
+
+```markdown
+## MsgMesh Remote Guidelines
+- Reference: `node_modules/@actdim/msgmesh-remote/llms.txt`
+```
+
+The package ships `llms.txt`, `llms-full.txt` and the `docs/` topics matching the installed version.
+
+---
+
+## AI-Assisted Development
+
+Developed with [Along](https://github.com/actdim/along) - a provider-agnostic context and memory system for AI coding agents.
+
+---
+
+## Changelog
+
+### 1.12.0 (2026-11-01)
+- Version aligned with the mempart monorepo release; no library changes
+
+### 1.11.0 (2026-10-30)
+- Initial release: wire protocol and `JsonFrameCodec` with validation; framework-agnostic `RemoteMeshServer` / `RemoteClientSession`; `RemoteMeshClient` with heartbeat, reconnect, subscription replay, offline queue and RPC; `bridgeRemoteBus`
+- In-band `AUTH` / `AUTH_OK` / `AUTH_FAIL`, channel groups, wildcard subscriptions, per-session event filtering
+- Generic `TChannel` / `TGroup` parameters; `url` accepts a getter function
+
+---
+
+## License
+
+MIT License. See [LICENSE](LICENSE) for details.
+
+---
+
+## Document: AGENTS.md (Agent Conventions & Protocol)
+
+<!-- BEGIN ALONG-PROTOCOL root (managed by along-init - do not edit by hand) -->
+# ALONG-PROTOCOL v4.5.4
+
+This repo carries its own agent context, provider-agnostically. Follow it every session, whatever tool you are. This is the core; procedures (completion checklist, doc routing, merges, along-team, tool-use rules) live in `docs/topic--along-protocol.md` - pull the section you need via `/along-kb-search`. A gate's error message carries its detail.
+
+## Where state lives
+- **Nearest wins**: any folder may carry its own `AGENTS.md` + `.along/`; use the NEAREST for the area you work in. Nearest `.along/` > higher-level `.along/` > global config. Only a nested `.git` or a user-run `along init` makes a subproject.
+- **Read at session start** (not auto-loaded): `.along/ISSUES.md`, `.along/CONSTRAINTS.md`, your issue `.along/ISSUES/<type>--<slug>.md`; when relevant `.along/VISION.md`, `.along/GLOSSARY.md`. They reflect the state WHEN WRITTEN - verify named files/APIs/flags against the code.
+- **Entities**: issues (`feat|bug|debt|task|docs|spike`), ADRs (`.along/DECISIONS/`, never edited - superseded), milestones, sessions. Keys `<type>--<slug>`, referenced by key, never by path; schemas in `docs/topic--domain-model.md`. Create them from intent unprompted (build/fix -> issue, blocked -> issue tagged `risk`, compare -> `spike` issue, release -> milestone).
+- **Projections** (`ISSUES.md`, `DECISIONS.md`, `CONSTRAINTS.md`, `docs/INDEX.md`) are compiled: on conflict take either side and re-run the sync.
+
+## Anchor work to an issue
+1. Find or create the issue with `status: in-progress`; `along start <slug>` binds this session.
+2. Source edits unlock after the user approves the plan (`EnterPlanMode` -> `ExitPlanMode`, or `along plan approve --plan-file <path>` after their explicit yes). Questions get read-only answers; 1-line typo/comment edits are exempt.
+3. Commit via `/along-commit`: bound to the slug, no AI `Co-Authored-By:` trailers.
+4. Finish with the completion checklist, ending in `along wrap <slug> --summary "..." (--decisions <ADR...> | --no-decisions)`.
+
+## Gates
+Runtime hooks enforce these where installed; elsewhere (`along doctor` shows the level) self-apply every one and use the `along` CLI instead of raw tools.
+- [gate: require-active-issue] [gate: require-plan-approval] - no source edit without an in-progress issue and an approved plan.
+- [gate: subproject-boundary] - a subproject's entities go in ITS `.along/`; cross-subproject work needs an issue in each, or a root umbrella with `parent:` children.
+- [gate: workspace-containment] - read/write inside the workspace (plus temp); other roots need `allowed_roots`; never credential stores.
+- [gate: projection-protection] - never hand-edit or hand-merge projections.
+- [gate: commit-issue-binding] - every commit names the active issue.
+- [gate: issue-lifecycle] [gate: entity-reference-integrity] [gate: entity-deletion-protection] - close via `along wrap` / `along issue done`; rename or supersede, never delete a referenced entity.
+- [gate: doc-manual-lock] - `write_policy: manual` docs change only under a `docs--<slug>` issue.
+- [gate: rule-pack-protection] - never edit `.along/rules/**/*.md` (`along rules attach` owns them).
+- [gate: doc-routing-compliance] - ADR vs `README.md` vs `docs/topic--*.md` routing tree.
+- [gate: untracked-exports] - dashboards and `.along/diagnostics/` stay out of Git.
+- [gate: cli_safety] - file content via file tools, never heredocs or `python -c`; no global installs.
+- [gate: team-step-active] [gate: team-reviews-before-stop] - an `along-team` blackboard holds you to its step loop.
+- [gate: test_before_stop] [gate: wrap_before_stop] [gate: projection_sync_before_stop] - before stopping: tests green, session wrapped, projections synced.
+- [gate: unresolved_gate_denial] - a denied tool call is redone within the gate's rules or told to the user (`along gates ack`), never dropped silently; closing waits for their reply.
+- Commit-time (`along lint`, pre-commit + CI): ASCII typography, fence languages, relative links, no `docs/` -> `.along/` links, Windows-safe names, no secrets, no stubs.
+- Bypass is the user's call: `-n`, `--force-reason`, `scratch fallback` need `--reason` after their reply; recorded in `along gates stats`.
+
+## Judgment rules
+- Ground facts in code, `README.md` and `docs/`; no generic placeholders. Query `/along-kb-search` before reading whole docs; update affected `docs/topic--*.md` after non-trivial changes.
+- Use `/along-test`, `/along-build`, `/along-dev` before raw commands, with quiet flags. Review your diff and blast radius (`along graph-impact`).
+- Never delete or truncate docs, comments or code unless told; no stubs; check `git diff --stat` after batch edits. Verify written files parse. Tests stay hermetic.
+- Scope > 3 files, crossing subsystems or refactoring core engines: route to `along-team`; plans MUST declare `Execution Mode: Direct` or `Role-Based`.
+- Treat the `along` CLI as a black box (`along <cmd> --help`, no engine source outside the Along repo); report its errors verbatim.
+<!-- END ALONG-PROTOCOL -->
+
+## Project specifics
+
+<!-- BEGIN ALONG-RULES -->
+See the following engineering guidelines:
+- `[languages/typescript.md](.along/rules/languages/typescript.md)`
+- `[platforms/web.md](.along/rules/platforms/web.md)`
+<!-- END ALONG-RULES -->
+
+- **Package**: `@actdim/msgmesh-remote` - bidirectional remote transport for `@actdim/msgmesh`: a JSON frame protocol (`SUB`, `UNSUB`, `MSG`, `REQ`, `RES`, `PING`, `PONG`, `AUTH`, `AUTH_OK`, `AUTH_FAIL`), a framework-agnostic `RemoteMeshServer` (sessions over a duck-typed `RemoteSocket`, mapped onto a server bus) and a resilient `RemoteMeshClient` (heartbeat, backoff reconnect, subscription replay, offline queue, correlated RPC) with `bridgeRemoteBus` to wire it into a local bus.
+- **Entry points**: `.` (everything, `src/index.ts`), `./client` (`src/client.ts`), `./server` (`src/server.ts`), `./protocol` (`src/protocol.ts`, values only); type contracts in `src/types.ts` (reachable as `./types` via the `./*` export). ESM only. Peers: `@actdim/msgmesh >=1.12.0`, `rxjs >=7.8.0`; the runtime never imports msgmesh, it uses the structural `RemoteBusLike` / `RemoteServerBusLike` interfaces.
+- **Commands** (package folder): `pnpm run build` (`tsc -b tsconfig.json && vite build`), `pnpm run typecheck`, `pnpm run test` (Vitest, `vitest.node.config.ts`, hermetic in-memory sockets in `tests/`), `pnpm run docs:build` (VitePress).
+- **Knowledge Base**: `docs/INDEX.md` (overview, core concepts, architecture and wiring, integration guide, API reference, domain model, setup). Consumers in mempart: `apps/server/src/controllers/ws/wsController.ts`, `apps/webapp/src/config/remoteClient.ts`.
+- **Versioning**: developed as a submodule of the mempart pnpm monorepo (`src/packages/msgmesh-remote`) under one unified version. Never bump `package.json` here in isolation; versions change only via mempart `pnpm run version:sync <version>` (from mempart `src/`), committed, tagged and pushed together with the root repo and all submodules.
+
+---
+
+## Document: docs/topic--01-overview-and-advantages.md (Overview & Key Advantages)
+
+# Overview & Key Advantages
+
+[<- Back to README](../README.md) | [Next: 02. Core Concepts ->](./topic--02-core-concepts.md)
+
+---
+
+## What is @actdim/msgmesh-remote?
+
+**`@actdim/msgmesh-remote`** extends an in-process [`@actdim/msgmesh`](https://actdim.github.io/msgmesh/) bus across a network boundary. A browser (or WebView) bus and a server bus exchange the same `{ channel, group, topic, payload }` messages over one duplex socket, using a small JSON frame protocol.
+
+The package has three parts, each published as its own entry point:
+
+- **Protocol** (`@actdim/msgmesh-remote/protocol`) - the frame vocabulary (`SUB`, `UNSUB`, `MSG`, `REQ`, `RES`, `PING`, `PONG`, `AUTH`, `AUTH_OK`, `AUTH_FAIL`), a validating JSON codec (`JsonFrameCodec`, `defaultCodec`) and frame factory functions.
+- **Client** (`@actdim/msgmesh-remote/client`) - `RemoteMeshClient`, a resilient connection with heartbeat, exponential reconnect, subscription replay, an offline send queue and correlated RPC; plus `bridgeRemoteBus` to wire it into a local bus declaratively.
+- **Server** (`@actdim/msgmesh-remote/server`) - `RemoteMeshServer`, a framework-agnostic session manager that maps client frames onto a server-side bus, with hooks for authentication, authorization, channel resolution and per-session event filtering.
+
+The root entry point (`@actdim/msgmesh-remote`) re-exports all three plus the shared type contracts.
+
+---
+
+## Where It Fits
+
+```mermaid
+flowchart LR
+    subgraph Browser["Browser / WebView"]
+        UI["UI components"] --> CBUS["msgmesh bus (client)"]
+        CBUS <--> BR["bridgeRemoteBus"]
+        BR <--> CL["RemoteMeshClient"]
+    end
+    CL <-- "JSON frames over WebSocket" --> SV["RemoteMeshServer"]
+    subgraph Server["Node.js server"]
+        SV --> SESS["RemoteClientSession (per socket)"]
+        SESS <--> SBUS["msgmesh bus (server)"]
+        SBUS <--> SVC["Domain services / job watchers"]
+    end
+```
+
+UI code keeps talking only to its local bus. Remote delivery, reconnects and authentication are concerns of the transport layer, not of components.
+
+---
+
+## Key Advantages
+
+### 1. One Messaging Model End to End
+- Frames carry the same `channel` / `group` / `topic` addressing that `@actdim/msgmesh` uses in-process, so a server event can land on the client bus unchanged and be consumed with a normal `bus.on(...)`.
+- RPC across the wire is a plain `client.request(channel, payload)` on the client and a plain `bus.request(...)` provider on the server.
+
+### 2. Transport Agnostic
+- The server depends only on the duck-typed `RemoteSocket` contract (`send`, `on('message' | 'close' | 'error')`, `close`). A `ws` socket from `@fastify/websocket` satisfies it directly; so does an in-memory socket pair in tests.
+- The client accepts a URL (string or getter) for the global `WebSocket`, or a `socketFactory` returning either a DOM-style `WebSocket` or any `RemoteSocket`.
+- Serialization is pluggable through the `FrameCodec` interface.
+
+### 3. Built for Flaky Mobile Connections
+- Client heartbeat: a `PING` every 15 s (`heartbeatIntervalMs`) and a 5 s `PONG` deadline (`heartbeatTimeoutMs`); a missed `PONG` terminates the half-open socket and reconnects. This targets WebViews (.NET MAUI, iOS WKWebView, Android WebView) where a suspended app can leave a socket silently dead.
+- Reconnect with exponential backoff (factor 1.5, 500 ms -> 10 s by default) and +/-20% jitter.
+- Subscriptions are kept in a registry and replayed after every reconnect; fire-and-forget sends made while offline are buffered (200 frames by default) and flushed in order.
+
+### 4. Security Hooks at the Session Boundary
+- Handshake context (`handleConnection(socket, { userId, metadata })`) plus in-band `AUTH` frames for login and token refresh without reconnecting (`client.authenticate(token)`).
+- `authorize(context, frame)` gates every non-`AUTH` frame; a denied `REQ` gets a `403` error response.
+- Per-session event filtering (`filterEvent`), with a built-in default that drops events whose payload `userId` / `ownerUserId` belongs to another user.
+
+### 5. Small, Dependency-Light
+- Runtime code is five source files; `@actdim/msgmesh` and `rxjs` are peer dependencies only. The client and server talk to "bus-like" structural interfaces (`RemoteBusLike`, `RemoteServerBusLike`), so a msgmesh bus fits without adapters and tests can pass plain object mocks.
+
+---
+
+## Real-World Usage (mempart)
+
+Inside the mempart monorepo the package connects the web app to the Fastify server:
+
+- **Server**: `apps/server/src/controllers/ws/wsController.ts` creates a `RemoteMeshServer<ServerChannel, 'in'>` over the server bus, registers it on `/api/v1/ws` and `/ws`, verifies tokens in `onAuthenticate`, starts job watching from `authorize` when a client subscribes to `JOBS.STATUS`, and enforces tenant isolation in `filterEvent`.
+- **Client**: `apps/webapp/src/config/remoteClient.ts` creates a `RemoteMeshClient` with a `tokenGetter` that asks the app bus for the current access token, bridges it to the app bus with `bridgeRemoteBus` (`WORKS.INTAKE.*`, `FEED.EXCHANGE.*`, `JOBS.STATUS`, `VFS.DRIVE.SYNC_STATUS`, `VFS.NODE.*`), and re-authenticates on `APP.SECURITY.AUTH.SIGNIN`.
+
+See [04. Integration Guide](./topic--04-integration-guide.md) for the full wiring.
+
+---
+
+[<- Back to README](../README.md) | [Next: 02. Core Concepts ->](./topic--02-core-concepts.md)
+
+---
+
+## Document: docs/topic--02-core-concepts.md (Core Concepts)
+
+# Core Concepts
+
+[<- Back to 01. Overview](./topic--01-overview-and-advantages.md) | [Next: 03. Architecture & Wiring ->](./topic--03-architecture-and-wiring.md)
+
+---
+
+## 1. Addressing: Channel, Group, Topic
+
+`@actdim/msgmesh` addresses every message by **channel** (for example `JOBS.STATUS`), **group** (`in`, `out`, `ex`, ... - the payload role; msgmesh defaults to `in`) and optional **topic** (a sub-stream key such as a job id). The remote protocol carries exactly these three fields on `SUB`, `UNSUB`, `MSG` and `REQ` frames, so a frame maps one-to-one onto a bus call:
+
+| Frame field | Bus field | Notes |
+|---|---|---|
+| `channel` | `channel` | Required, non-empty string |
+| `group` | `group` | Optional; omitted means the bus default group |
+| `topic` | `topic` | Optional; `'*'` in a `SUB` means "every topic" |
+| `payload` | `payload` | Optional; any JSON-serializable value |
+
+### Wildcards in subscriptions
+
+A client subscription is a `{ channel, topic?, group? }` triple. The server matches incoming bus events against it with `RemoteClientSession.isSubscribed(channel, topic?, group?)`:
+
+- **Channel**: `'*'` matches everything; a trailing `*` is a prefix match (`'WORKS.INTAKE.*'` matches `WORKS.INTAKE.COMPLETED`); anything else is exact.
+- **Topic / group**: missing or `'*'` matches any value; anything else is exact.
+
+The server must also *listen* on concrete bus channels. A msgmesh bus has no channel wildcards, so a prefix subscription needs `RemoteServerOptions.resolveChannels(pattern)` to expand the pattern into the list of real channels (see "Server subscription pipeline" in [03. Architecture & Wiring](./topic--03-architecture-and-wiring.md)).
+
+---
+
+## 2. Frames
+
+All traffic is a stream of frames discriminated by the `t` field. Shapes are defined in `src/types.ts` and validated by `validateFrame` in `src/protocol.ts`.
+
+| `t` | Direction | Purpose | Required fields |
+|---|---|---|---|
+| `SUB` | client -> server | Start receiving events for an address | `channel` |
+| `UNSUB` | client -> server | Stop receiving events for an address | `channel` |
+| `MSG` | both | Fire-and-forget message / event | `channel` |
+| `REQ` | client -> server | Correlated RPC request | `id`, `channel` |
+| `RES` | server -> client | RPC response (`payload` or `error`) | `id` |
+| `PING` | both | Heartbeat probe | - |
+| `PONG` | both | Heartbeat answer | - |
+| `AUTH` | client -> server | Authenticate or refresh the token in-band | `token` (non-empty) |
+| `AUTH_OK` | server -> client | Authentication accepted (optional `userId`) | - |
+| `AUTH_FAIL` | server -> client | Authentication rejected (optional `code`) | `error` (non-empty) |
+
+The full field-level contract is in [Domain Model](./topic--domain-model.md).
+
+### Codec
+
+A `FrameCodec` turns frames into wire data and back:
+
+```typescript
+export interface FrameCodec {
+    encode(frame: RemoteFrame): string | Uint8Array;
+    decode(raw: string | Uint8Array): RemoteFrame;
+}
+```
+
+`JsonFrameCodec` (exported singleton: `defaultCodec`) encodes with `JSON.stringify`, decodes strings or `Uint8Array` (UTF-8 via `TextDecoder`), and validates the result. Bad JSON raises `FrameDecodeError`; a structurally invalid frame raises `InvalidFrameError`. Both the client and the server log decode failures and drop the frame instead of closing the connection.
+
+---
+
+## 3. The Bus-Like Contracts
+
+Neither side imports the msgmesh runtime. They depend on structural interfaces that a msgmesh `MsgBus` already satisfies:
+
+- **`RemoteServerBusLike`** (server side): optional `send(msg)`, `request(msg)` and `on({ channel, group?, topic?, options?: { abortSignal }, callback })`.
+- **`RemoteBusLike`** (client side): everything above plus optional `provide({ channel, group?, callback })`.
+
+Every method is optional; the code checks `typeof bus.x === 'function'` before calling. Missing `request` on the server produces an error `RES` (`'Server bus has no request provider'`); missing `send` or `on` turns the corresponding feature into a no-op.
+
+---
+
+## 4. Client Connection Lifecycle
+
+`RemoteMeshClient` is a small state machine exposed through `getState()` and `onStateChange(listener)`:
+
+```mermaid
+stateDiagram-v2
+    [*] --> CLOSED
+    CLOSED --> CONNECTING: connect() (first attempt)
+    CONNECTING --> OPEN: socket open
+    OPEN --> RECONNECTING: socket closed / PONG timeout
+    RECONNECTING --> RECONNECTING: backoff timer -> connect()
+    RECONNECTING --> OPEN: socket open
+    OPEN --> CLOSED: close()
+    CONNECTING --> CLOSED: close()
+    RECONNECTING --> CLOSED: close()
+```
+
+On every transition to `OPEN` the client, in order:
+
+1. resets the reconnect attempt counter and starts the heartbeat;
+2. sends an `AUTH` frame if `options.token` or `await options.tokenGetter()` yields a token;
+3. replays a `SUB` frame for every registered subscription;
+4. flushes the offline queue.
+
+The automatic `AUTH` on open is fire-and-forget: frames sent in steps 3-4 do not wait for `AUTH_OK`. Use the server's handshake context or `authorize` if early frames must already be authenticated.
+
+### Socket flavours
+
+- **DOM-style `WebSocket`** (has `addEventListener`): the client waits for the `open` event and unwraps `MessageEvent.data`.
+- **`RemoteSocket`** (has `on`): the socket is treated as already open, and the open sequence runs immediately.
+
+### Heartbeat
+
+While `OPEN`, the client sends `PING` every `heartbeatIntervalMs` (default `15000`) and arms a `heartbeatTimeoutMs` timer (default `5000`). A `PONG` clears the timer; otherwise the client closes the socket and schedules a reconnect. The client also answers server `PING` frames with `PONG`. The server answers `PING` but never originates one.
+
+### Reconnect backoff
+
+```text
+delay = min(minReconnectDelayMs * 1.5^(attempt - 1), maxReconnectDelayMs) * random(0.8 .. 1.2)
+```
+
+Defaults: `minReconnectDelayMs = 500`, `maxReconnectDelayMs = 10000`. Only an explicit `close()` stops reconnecting. A `url` given as a function is re-evaluated on each attempt, so it can embed a fresh token or host.
+
+---
+
+## 5. Subscriptions, Offline Queue and Requests
+
+| Operation | While `OPEN` | While not `OPEN` |
+|---|---|---|
+| `subscribe(channel, topic?, group?)` | Registered and `SUB` sent | Registered; `SUB` sent on next open |
+| `unsubscribe(channel, topic?, group?)` | Removed and `UNSUB` sent | Removed from the registry only |
+| `send(channel, payload?, topic?, group?)` | `MSG` sent | Queued (FIFO, up to `maxOfflineQueueSize`, default `200`; overflow is dropped with a warning) |
+| `request(channel, payload?, { topic?, group?, timeout? })` | `REQ` sent, awaits `RES` | Registered but **not sent and not queued**; rejects on timeout |
+
+Subscription identity is the key `channel::group::topic`, so subscribing twice to the same address is idempotent.
+
+`request()` generates an id (`req-<random>-<time>`), rejects with `Request timeout after <ms>ms` after `options.timeout ?? defaultRequestTimeoutMs ?? 10000`, resolves with `RES.payload`, and rejects with the raw `RES.error` value when the server reports an error. `close()` rejects every pending request and pending authentication with `Client connection closed` and clears the offline queue.
+
+---
+
+## 6. Authentication
+
+Two mechanisms coexist:
+
+- **Handshake context**: the host verifies credentials during the WebSocket upgrade (query string, header, cookie) and passes `{ userId, metadata }` to `server.handleConnection(socket, context)`.
+- **In-band `AUTH`**: the client sends `AUTH` (automatically on open, or explicitly via `authenticate(token, timeoutMs = 10000)`). The server calls `onAuthenticate(token, context)`:
+
+| `onAuthenticate` result | Server reply | Session effect |
+|---|---|---|
+| hook not configured | `AUTH_OK` with current `userId` | none |
+| falsy (`null`, `false`) | `AUTH_FAIL` `'Authentication failed'`, code `401` | none |
+| `true` | `AUTH_OK` with current `userId` | none |
+| `{ userId?, metadata? }` | `AUTH_OK` with resulting `userId` | `userId` replaced, `metadata` shallow-merged |
+| throws | `AUTH_FAIL` with the error message, code `500` | none |
+
+`authenticate()` resolves on `AUTH_OK` and rejects on `AUTH_FAIL` or timeout; a newer call supersedes a pending one. It rejects immediately if the client is not `OPEN`.
+
+---
+
+## 7. Authorization and Event Filtering
+
+- **`authorize(context, frame)`** runs for every inbound frame except `AUTH` (including `PING`). If it returns `false`, the frame is dropped; a denied `REQ` receives `RES` with `error: { message: 'Unauthorized', code: 403 }`.
+- **`filterEvent(context, channel, payload, topic?, group?)`** decides per session whether a bus event is forwarded. Without it, the default filter drops an event when the payload has `userId` or `ownerUserId`, the session has a `userId`, and the two differ (compared as strings). Sessions without a `userId` receive everything under the default filter.
+- **`server.broadcast(...)`** pushes directly to subscribed sessions and does not run `filterEvent`.
+
+---
+
+[<- Back to 01. Overview](./topic--01-overview-and-advantages.md) | [Next: 03. Architecture & Wiring ->](./topic--03-architecture-and-wiring.md)
+
+---
+
+## Document: docs/topic--03-architecture-and-wiring.md (Architecture & Wiring)
+
+# Architecture & Wiring
+
+[<- Back to 02. Core Concepts](./topic--02-core-concepts.md) | [Next: 04. Integration Guide ->](./topic--04-integration-guide.md)
+
+---
+
+## 1. Component Map
+
+```mermaid
+flowchart TB
+    subgraph Client["Client process (browser / WebView)"]
+        LBUS["Local bus (RemoteBusLike)"]
+        BRIDGE["bridgeRemoteBus / client.attachToBus"]
+        RMC["RemoteMeshClient"]
+        LBUS -- "provide(remoteRequests)" --> BRIDGE
+        BRIDGE -- "bus.send(MSG)" --> LBUS
+        BRIDGE <--> RMC
+    end
+    subgraph Wire["Transport"]
+        SOCK["WebSocket or RemoteSocket + FrameCodec"]
+    end
+    subgraph Server["Server process"]
+        RMS["RemoteMeshServer"]
+        SES["RemoteClientSession (1 per socket)"]
+        SBUS["Server bus (RemoteServerBusLike)"]
+        RMS -- "handleConnection" --> SES
+        SES -- "send / request / on" --> SBUS
+    end
+    RMC <--> SOCK <--> SES
+```
+
+| Unit | File | Responsibility |
+|---|---|---|
+| Frame types, socket and bus contracts | `src/types.ts` | Pure type declarations |
+| Codec, validation, frame factories | `src/protocol.ts` | `JsonFrameCodec`, `validateFrame`, `create*Frame` |
+| `RemoteMeshServer`, `RemoteClientSession` | `src/server.ts` | Session registry, frame dispatch, bus listeners, auth hooks |
+| `RemoteMeshClient`, `bridgeRemoteBus` | `src/client.ts` | Connection state, heartbeat, reconnect, queue, RPC, bus bridge |
+
+---
+
+## 2. Connection Open, Auth and Resubscribe
+
+```mermaid
+sequenceDiagram
+    participant App as Client app
+    participant C as RemoteMeshClient
+    participant S as RemoteClientSession
+    participant H as Server hooks
+    App->>C: connect()
+    Note over C: state CONNECTING (or RECONNECTING)
+    C->>S: socket open (handleConnection(socket, context))
+    Note over C: state OPEN, heartbeat started
+    C->>S: AUTH { token } (if token / tokenGetter)
+    S->>H: onAuthenticate(token, context)
+    H-->>S: { userId, metadata } | true | falsy
+    S-->>C: AUTH_OK { userId } or AUTH_FAIL { error, code }
+    C->>S: SUB { channel, topic?, group? } (replay of every registered subscription)
+    C->>S: MSG ... (offline queue flush, FIFO)
+```
+
+`AUTH`, `SUB` and the queued `MSG` frames are written back to back. On the server each frame is dispatched as `void session.handleFrame(frame)`, so an `onAuthenticate` that awaits I/O can still be running when the following `SUB` frames are processed.
+
+---
+
+## 3. Remote RPC (client -> server)
+
+```mermaid
+sequenceDiagram
+    participant UI as UI code
+    participant LB as Local bus
+    participant BR as bridgeRemoteBus provider
+    participant C as RemoteMeshClient
+    participant S as RemoteClientSession
+    participant SB as Server bus
+    UI->>LB: request({ channel: 'API.REMOTE.CALL', payload })
+    LB->>BR: provider callback(inMsg)
+    BR->>C: request(channel, inMsg.payload, { topic, group })
+    C->>S: REQ { id, channel, topic?, group?, payload }
+    S->>S: authorize(context, frame)?
+    S->>SB: request({ channel, group, topic, payload })
+    SB-->>S: response (msgmesh Msg or raw value)
+    S-->>C: RES { id, payload } or RES { id, error }
+    C-->>BR: resolve(payload) / reject(error)
+    BR-->>LB: provider result
+    LB-->>UI: response
+```
+
+- Only channels listed in `RemoteBusBridgeConfig.remoteRequests` (array form) get a local `provide()` registration. The topic and group are taken from `inMsg.address` (falling back to `inMsg.topic` / `inMsg.group`).
+- On the server, a response object that has a `payload` property (a msgmesh response message) is unwrapped to that `payload`; any other value is sent as-is.
+- A thrown error becomes `RES.error`: for an `Error` instance `{ message, name, ...ownEnumerableProps }`, for another object its own enumerable props, otherwise `{ message: String(err) }`.
+- `client.request()` can also be called directly without the bridge.
+
+---
+
+## 4. Server Events to the Client (pub/sub)
+
+```mermaid
+sequenceDiagram
+    participant C as RemoteMeshClient
+    participant S as RemoteClientSession
+    participant SB as Server bus
+    participant SVC as Server service
+    participant LB as Client local bus
+    C->>S: SUB { channel: 'WORKS.INTAKE.*' }
+    S->>S: resolveChannels('WORKS.INTAKE.*') -> concrete channels
+    S->>SB: on({ channel, topic, options: { abortSignal }, callback }) per channel
+    SVC->>SB: send({ channel: 'WORKS.INTAKE.RECEIVED', payload })
+    SB-->>S: callback(msg)
+    S->>S: isSubscribed(channel, topic, group) and filterEvent / default owner filter
+    S-->>C: MSG { channel, topic?, group?, payload }
+    C->>C: onMessage listeners
+    C->>LB: bus.send({ channel, group, topic, payload }) (via bridge)
+```
+
+### Server subscription pipeline
+
+For a `SUB` frame, `RemoteClientSession`:
+
+1. Stores the subscription under `channel::group::topic`.
+2. Computes the bus channels to listen on: `resolveChannels(frame.channel)` if configured, otherwise `[frame.channel]` verbatim.
+3. For each bus channel not yet listened on (keyed by `busChannel::topic`), calls `bus.on({ channel, topic, options: { abortSignal }, callback })`. A topic of `'*'` is translated to the msgmesh regex topic `'/.*/'`. No `group` is passed, so a msgmesh bus listens on its default group (`in`), which is also the group `bus.send` uses when none is given.
+4. In the callback, reads `channel` / `topic` / `group` from `msg.address` (or top-level fields), takes `msg.payload` (or the whole message if there is none), re-checks `isSubscribed`, applies `filterEvent` (or the default owner filter) and sends a `MSG` frame.
+
+Two consequences for a msgmesh server bus:
+
+- **Channel wildcards need `resolveChannels`.** Without it, `SUB 'WORKS.INTAKE.*'` makes the session listen on a bus channel literally named `WORKS.INTAKE.*`.
+- **Topic-less subscriptions only see topic-less events.** msgmesh matches an undefined listener topic only against messages without a topic, so to receive `JOBS.STATUS` events published with `topic: jobId`, subscribe with that topic (or with `'*'`).
+
+`UNSUB` removes the stored subscription and aborts a bus listener only when no remaining subscription resolves to the same bus channel and topic. Closing the socket (`close` or `error` event) calls `session.close()`, which aborts every bus listener and removes the session from the server.
+
+### Server-initiated pushes
+
+`server.broadcast(channel, payload?, topic?, group?)` sends a `MSG` to every session whose subscriptions match, independent of the server bus.
+
+---
+
+## 5. Client Messages to the Server (fire-and-forget)
+
+```mermaid
+sequenceDiagram
+    participant App as Client app
+    participant C as RemoteMeshClient
+    participant S as RemoteClientSession
+    participant SB as Server bus
+    App->>C: send('CAD.OBJECT_MUTATION', payload)
+    alt state OPEN
+        C->>S: MSG { channel, payload }
+    else not OPEN
+        C->>C: offlineQueue.push (max maxOfflineQueueSize)
+        Note over C: flushed after next open
+        C->>S: MSG { channel, payload }
+    end
+    S->>S: authorize(context, frame)?
+    S->>SB: send({ channel, group, topic, payload })
+```
+
+---
+
+## 6. Heartbeat and Reconnect
+
+```mermaid
+sequenceDiagram
+    participant C as RemoteMeshClient
+    participant S as RemoteClientSession
+    loop every heartbeatIntervalMs (15000)
+        C->>S: PING
+        alt PONG within heartbeatTimeoutMs (5000)
+            S-->>C: PONG
+        else timeout
+            C->>C: close socket, state RECONNECTING
+            C->>C: wait min(min * 1.5^(n-1), max) * jitter
+            C->>S: new socket, open sequence (AUTH, SUB replay, queue flush)
+        end
+    end
+```
+
+---
+
+## 7. Declarative Bridge
+
+`bridgeRemoteBus(bus, client, config)` (or `client.attachToBus(bus, config)`) wires three things and returns one disposer:
+
+| Config field | Effect |
+|---|---|
+| `remoteSubscriptions: RemoteSubscriptionItem[]` | `client.subscribe(...)` for each item now; `client.unsubscribe(...)` on dispose |
+| `remoteRequests: TChannel[]` | `bus.provide({ channel, callback })` forwarding to `client.request(...)`; provider disposed on dispose |
+| *(always)* | `client.onMessage` -> `bus.send({ channel, group, topic, payload })` for every incoming `MSG` |
+
+`RemoteBusBridgeConfig` also declares `remoteRequests` as a predicate function and a `sendToRemote` field; neither is acted on by `bridgeRemoteBus` in the current source (only the array form of `remoteRequests` registers providers, and local-to-remote forwarding is done by calling `client.send` yourself).
+
+---
+
+[<- Back to 02. Core Concepts](./topic--02-core-concepts.md) | [Next: 04. Integration Guide ->](./topic--04-integration-guide.md)
+
+---
+
+## Document: docs/topic--04-integration-guide.md (Integration Guide)
+
+# Integration Guide
+
+[<- Back to 03. Architecture & Wiring](./topic--03-architecture-and-wiring.md) | [Next: 05. API Reference ->](./topic--05-api-reference.md)
+
+---
+
+## 1. Installation
+
+```bash
+pnpm add @actdim/msgmesh-remote @actdim/msgmesh rxjs
+```
+
+| Peer dependency | Range |
+|---|---|
+| `@actdim/msgmesh` | `>=1.12.0` |
+| `rxjs` | `>=7.8.0` |
+
+The package is ESM-only (`"type": "module"`) and side-effect free. Import from the narrowest entry point you need:
+
+| Import path | Use in | Contains |
+|---|---|---|
+| `@actdim/msgmesh-remote/client` | Browser / WebView | `RemoteMeshClient`, `bridgeRemoteBus`, client option and bridge types |
+| `@actdim/msgmesh-remote/server` | Node.js server | `RemoteMeshServer`, `RemoteClientSession`, server option and context types |
+| `@actdim/msgmesh-remote/protocol` | Either side, tools, tests | Codec, validation, error classes, `create*Frame` factories |
+| `@actdim/msgmesh-remote/types` | Either side | All frame, codec, socket and bus-like type contracts (via the `./*` export) |
+| `@actdim/msgmesh-remote` | Either side | Everything above |
+
+---
+
+## 2. Server: Fastify + @fastify/websocket
+
+`@fastify/websocket` hands each route a `ws` socket, which already matches the `RemoteSocket` contract (`send`, `on('message' | 'close' | 'error')`, `close`). This is condensed from mempart's `apps/server/src/controllers/ws/wsController.ts`:
+
+```typescript
+import { type FastifyInstance, type FastifyRequest } from 'fastify';
+import {
+    RemoteMeshServer,
+    type RemoteSocket,
+    type RemoteConnectionContext,
+    type RemoteFrame,
+} from '@actdim/msgmesh-remote/server';
+
+export function wsController(fastify: FastifyInstance): RemoteMeshServer<ServerChannel, 'in'> {
+    const remoteServer = new RemoteMeshServer<ServerChannel, 'in'>({
+        bus: serverBus, // a msgmesh MsgBus
+        // msgmesh has no channel wildcards: expand 'WORKS.INTAKE.*' into concrete channels
+        resolveChannels: (pattern: string): ServerChannel[] => {
+            if (pattern === '*' || pattern.endsWith('*')) {
+                const prefix = pattern === '*' ? '' : pattern.slice(0, -1);
+                return knownChannels.filter((ch) => ch.startsWith(prefix));
+            }
+            const exact = pattern as ServerChannel;
+            return knownChannels.includes(exact) ? [exact] : [];
+        },
+        // in-band AUTH frames
+        onAuthenticate: async (token: string) => {
+            const auth = await verifyRemoteToken(token, fastify);
+            if (!auth) return null; // -> AUTH_FAIL 401
+            return { userId: auth.userId, metadata: { roles: auth.roles, email: auth.email } };
+        },
+        // runs for every non-AUTH frame
+        authorize: async (context: RemoteConnectionContext, frame: RemoteFrame) => true,
+        // per-session event visibility
+        filterEvent: (context: RemoteConnectionContext, _channel: string, payload: unknown): boolean => {
+            if (!context.userId) return false;
+            const record = payload as Record<string, unknown> | undefined;
+            const owner = record?.ownerUserId ?? record?.userId;
+            return owner === undefined || String(owner) === String(context.userId);
+        },
+    });
+
+    fastify.get('/api/v1/ws', { websocket: true }, async (socket: unknown, request: FastifyRequest) => {
+        // optional handshake authentication (?token= or Authorization: Bearer)
+        const query = request.query as { token?: string } | undefined;
+        const auth = query?.token ? await verifyRemoteToken(query.token, fastify) : null;
+        const initialContext: Partial<RemoteConnectionContext> | undefined = auth
+            ? { userId: auth.userId, metadata: { roles: auth.roles, email: auth.email } }
+            : undefined;
+
+        remoteServer.handleConnection(socket as RemoteSocket, initialContext);
+    });
+
+    return remoteServer;
+}
+```
+
+`ServerChannel`, `serverBus`, `knownChannels` and `verifyRemoteToken` are application code. Requirements on the server bus:
+
+- `send({ channel, group?, topic?, payload? })` - receives client `MSG` frames.
+- `request({ channel, group?, topic?, payload? })` - serves client `REQ` frames; resolve with a msgmesh response message (its `payload` is unwrapped) or a raw value.
+- `on({ channel, topic?, options: { abortSignal }, callback })` - lets sessions listen for events they forward. Publish events with `bus.send(...)` without a group (or with `group: 'in'`) so they reach these listeners on a msgmesh bus.
+
+### Any other socket library
+
+Anything that can be adapted to `RemoteSocket` works, including a plain `ws` server:
+
+```typescript
+import { WebSocketServer } from 'ws';
+import { RemoteMeshServer, type RemoteSocket } from '@actdim/msgmesh-remote/server';
+
+const remoteServer = new RemoteMeshServer({ bus: serverBus });
+const wss = new WebSocketServer({ port: 8080 });
+wss.on('connection', (socket) => {
+    remoteServer.handleConnection(socket as unknown as RemoteSocket, { connectionId: crypto.randomUUID() });
+});
+```
+
+Because the frames are plain JSON objects with a `t` discriminator, a server written in another language can implement the same protocol; this package ships only the TypeScript server.
+
+---
+
+## 3. Client: Browser or WebView
+
+Condensed from mempart's `apps/webapp/src/config/remoteClient.ts`:
+
+```typescript
+import { RemoteMeshClient, bridgeRemoteBus, type RemoteBusLike } from '@actdim/msgmesh-remote/client';
+
+const client = new RemoteMeshClient({
+    url: () => `${apiBaseUrl.replace(/^http/, 'ws')}/api/v1/ws`, // re-evaluated on every (re)connect
+    tokenGetter: async () => {
+        const auth = await appBus.request({ channel: 'APP.SECURITY.AUTH.INFO.GET', group: 'in', options: { timeout: 3000 } });
+        const payload = auth?.payload as { accessToken?: string; isAuthenticated?: boolean } | undefined;
+        return payload?.isAuthenticated ? payload.accessToken : undefined;
+    },
+    heartbeatIntervalMs: 15000,
+    heartbeatTimeoutMs: 5000,
+    minReconnectDelayMs: 500,
+    maxReconnectDelayMs: 10000,
+    maxOfflineQueueSize: 200,
+});
+
+const unbridge = bridgeRemoteBus(appBus as unknown as RemoteBusLike, client, {
+    remoteSubscriptions: [
+        { channel: 'WORKS.INTAKE.*' },
+        { channel: 'FEED.EXCHANGE.*' },
+        { channel: 'VFS.NODE.*' },
+    ],
+});
+
+client.connect();
+
+// Refresh the token in-band after the user signs in again
+appBus.on({
+    channel: 'APP.SECURITY.AUTH.SIGNIN',
+    group: 'in',
+    callback: (msg) => {
+        const token = (msg.payload as { accessToken?: string } | undefined)?.accessToken;
+        if (token && client.getState() === 'OPEN') {
+            void client.authenticate(token).catch(() => {});
+        }
+    },
+});
+```
+
+Bridged `MSG` frames are re-published on the local bus with `bus.send(...)`, so UI code consumes them like any local event:
+
+```typescript
+appBus.on({
+    channel: 'JOBS.STATUS',
+    topic: jobId,
+    group: 'in',
+    callback: (msg) => updateProgress(msg.payload),
+});
+```
+
+### Per-topic subscriptions
+
+Subscribe to a concrete topic for keyed streams and unsubscribe when done:
+
+```typescript
+client.subscribe('JOBS.STATUS', jobId);
+// ...
+client.unsubscribe('JOBS.STATUS', jobId);
+```
+
+Subscriptions survive reconnects; you do not need to resubscribe in `onStateChange`.
+
+### Remote RPC through the local bus
+
+List channels in `remoteRequests` to make `appBus.request(...)` on those channels go to the server:
+
+```typescript
+const unbridge = client.attachToBus(appBus as unknown as RemoteBusLike, {
+    remoteRequests: ['API.REMOTE.CALL'],
+});
+
+const res = await appBus.request({ channel: 'API.REMOTE.CALL', payload: { query: 'test' } });
+```
+
+Or call the server directly:
+
+```typescript
+const doc = await client.request<{ docId: string; name: string }>('CAD.GET_DOCUMENT', { id: 'doc-001' }, { timeout: 5000 });
+```
+
+### Fire-and-forget to the server
+
+```typescript
+client.send('CAD.OBJECT_MUTATION', { id: 'obj-1', color: 'red' });
+```
+
+Sent immediately when `OPEN`, otherwise buffered and flushed after the next open.
+
+### Connection status in UI
+
+```typescript
+const off = client.onStateChange((state) => {
+    // 'CONNECTING' | 'OPEN' | 'RECONNECTING' | 'CLOSED'
+    statusBadge.set(state);
+});
+```
+
+### Teardown
+
+```typescript
+unbridge();     // removes local providers, message forwarding and bridge subscriptions
+client.close(); // stops reconnecting, rejects pending requests, clears the offline queue
+```
+
+### Non-browser clients
+
+In environments without a global `WebSocket`, pass `socketFactory`. If neither `url` nor `socketFactory` is usable, socket creation fails, the error is logged and the client keeps retrying with backoff.
+
+```typescript
+const client = new RemoteMeshClient({ socketFactory: () => createMySocket() });
+```
+
+A factory returning a `RemoteSocket` (with `on`) is treated as already open.
+
+---
+
+## 4. Testing Without a Network
+
+All tests in `tests/` run in Node with in-memory sockets:
+
+- `tests/integration.test.ts` builds a linked `RemoteSocket` pair (`createSocketPair()`), connects a real `RemoteMeshClient` to a real `RemoteMeshServer` with a mock bus, and covers RPC, server-to-client pub/sub and offline buffering.
+- `tests/client.test.ts` and `tests/server.test.ts` use a `MockSocket` class that records `sent` frames and exposes `triggerMessage` / `receiveMessage`.
+
+A mock bus is just an object literal, because every bus method is optional:
+
+```typescript
+const serverBus = {
+    on: () => {},
+    send: () => {},
+    request: async (msg: { channel: string; payload?: unknown }) => ({ ok: true, channel: msg.channel }),
+};
+const server = new RemoteMeshServer({ bus: serverBus });
+```
+
+For raw protocol tests against a running server, use the protocol entry point (as mempart's `apps/server/src/testRemoteMeshWebSocket.ts` does):
+
+```typescript
+import { defaultCodec, createAuthFrame, createSubFrame, createPingFrame } from '@actdim/msgmesh-remote/protocol';
+
+ws.send(defaultCodec.encode(createPingFrame()));
+ws.send(defaultCodec.encode(createAuthFrame(token)));
+ws.send(defaultCodec.encode(createSubFrame('JOBS.STATUS', jobId)));
+```
+
+---
+
+## 5. Checklist
+
+- Server bus channels that clients subscribe to with wildcards are listed in `resolveChannels`.
+- Keyed streams (job ids, drive ids) are subscribed with a topic.
+- `filterEvent` is set if anonymous sessions must not receive events (the default owner filter lets them through).
+- `authorize` returns `true` for `PING` frames, otherwise heartbeats go unanswered and clients reconnect every cycle.
+- The client is closed with `close()` on app teardown so it stops reconnecting.
+
+---
+
+[<- Back to 03. Architecture & Wiring](./topic--03-architecture-and-wiring.md) | [Next: 05. API Reference ->](./topic--05-api-reference.md)
+
+---
+
+## Document: docs/topic--05-api-reference.md (API Reference)
+
+# API Reference
+
+[<- Back to 04. Integration Guide](./topic--04-integration-guide.md) | [Back to Main README](../README.md)
+
+---
+
+## Entry Points
+
+| Path | Source | Exports |
+|---|---|---|
+| `@actdim/msgmesh-remote` | `src/index.ts` | `export *` from `types`, `protocol`, `server`, `client` |
+| `@actdim/msgmesh-remote/client` | `src/client.ts` | Client section below + `type RemoteBusLike` |
+| `@actdim/msgmesh-remote/server` | `src/server.ts` | Server section below + `type RemoteSocket`, `RemoteFrame`, `RemoteServerBusLike` |
+| `@actdim/msgmesh-remote/protocol` | `src/protocol.ts` | Protocol section below; values only (no type re-exports) |
+| `@actdim/msgmesh-remote/types` | `src/types.ts` | Types section below (reachable through the `./*` export pattern) |
+
+Generic parameters used throughout: `TChannel extends string = string` (channel name union), `TGroup extends string = string` (group name union, server side), `TPayload = unknown`, `TError = unknown`.
+
+---
+
+## Client (`@actdim/msgmesh-remote/client`)
+
+### `class RemoteMeshClient<TChannel>`
+
+```typescript
+constructor(options: RemoteClientOptions)
+readonly options: RemoteClientOptions
+readonly codec: FrameCodec // options.codec ?? defaultCodec
+```
+
+| Member | Signature | Purpose |
+|---|---|---|
+| `getState` | `(): ClientConnectionState` | Current state (initially `'CLOSED'`) |
+| `onStateChange` | `(listener: (state) => void): () => void` | Listen to state transitions; returns an unsubscribe function |
+| `onMessage` | `(listener: (frame: RemoteMsgFrame<TChannel>) => void): () => void` | Listen to incoming `MSG` frames; listener errors are logged |
+| `connect` | `(): void` | Open the socket (no-op while `OPEN` or `CONNECTING`); clears the explicit-close flag |
+| `authenticate` | `(token: string, timeoutMs = 10000): Promise<void>` | Send `AUTH`; resolve on `AUTH_OK`, reject on `AUTH_FAIL` / timeout / not `OPEN` |
+| `subscribe` | `(channel: TChannel, topic?: string, group?: string): void` | Register a subscription; sends `SUB` when `OPEN`, replayed on every open |
+| `unsubscribe` | `(channel: TChannel, topic?: string, group?: string): void` | Remove a subscription; sends `UNSUB` when `OPEN` |
+| `send` | `(channel: TChannel, payload?: unknown, topic?: string, group?: string): void` | Send `MSG`; queued while not `OPEN` |
+| `request` | `<T = unknown>(channel: TChannel, payload?: unknown, options?: { topic?: string; group?: string; timeout?: number }): Promise<T>` | Correlated RPC via `REQ` / `RES` |
+| `close` | `(): void` | Stop reconnecting, reject pending auth and requests, clear the queue, close the socket, state `'CLOSED'` |
+| `attachToBus` | `(bus: RemoteBusLike<TChannel>, options?: RemoteBusBridgeConfig<TChannel>): () => void` | Same as `bridgeRemoteBus(bus, this, options)` |
+
+### `function bridgeRemoteBus<TChannel>(bus, client, config?): () => void`
+
+```typescript
+function bridgeRemoteBus<TChannel extends string = string>(
+    bus: RemoteBusLike<TChannel>,
+    client: RemoteMeshClient<TChannel>,
+    config?: RemoteBusBridgeConfig<TChannel>,
+): () => void;
+```
+
+Subscribes `config.remoteSubscriptions`, forwards every incoming `MSG` to `bus.send`, registers `bus.provide` forwarders for the array form of `config.remoteRequests`. The returned function undoes all three.
+
+### `type ClientConnectionState`
+
+```typescript
+type ClientConnectionState = 'CONNECTING' | 'OPEN' | 'RECONNECTING' | 'CLOSED';
+```
+
+### `interface RemoteClientOptions`
+
+| Option | Type | Default | Purpose |
+|---|---|---|---|
+| `url` | `string \| (() => string)` | - | WebSocket URL for the global `WebSocket`; a function is called on each connect |
+| `socketFactory` | `() => WebSocket \| RemoteSocket` | - | Custom socket; takes precedence over `url` |
+| `token` | `string` | - | Static token sent as `AUTH` on every open |
+| `tokenGetter` | `() => string \| undefined \| Promise<string \| undefined>` | - | Token provider used when `token` is not set |
+| `codec` | `FrameCodec` | `defaultCodec` | Frame serialization |
+| `heartbeatIntervalMs` | `number` | `15000` | `PING` interval |
+| `heartbeatTimeoutMs` | `number` | `5000` | Max wait for `PONG` before the socket is terminated |
+| `minReconnectDelayMs` | `number` | `500` | First reconnect delay (before jitter) |
+| `maxReconnectDelayMs` | `number` | `10000` | Backoff cap (before jitter) |
+| `maxOfflineQueueSize` | `number` | `200` | Max buffered `MSG` frames while not `OPEN` |
+| `defaultRequestTimeoutMs` | `number` | `10000` | `request()` timeout when none is passed |
+| `logger` | `{ debug?, info?, warn?, error? }` | - | Optional logger; each method is `(msg: string, ...args: unknown[]) => void` |
+
+### `interface RemoteSubscriptionItem<TChannel>`
+
+```typescript
+interface RemoteSubscriptionItem<TChannel extends string = string> {
+    channel: TChannel;
+    topic?: string;
+    group?: string;
+}
+```
+
+### `interface RemoteBusBridgeConfig<TChannel>`
+
+| Field | Type | Behavior in `bridgeRemoteBus` |
+|---|---|---|
+| `remoteRequests` | `TChannel[] \| ((channel: string) => boolean)` | Array: one `bus.provide` forwarder per channel. Function form: declared, not used |
+| `sendToRemote` | `TChannel[] \| ((channel: string) => boolean)` | Declared, not used |
+| `remoteSubscriptions` | `RemoteSubscriptionItem<TChannel>[]` | Subscribed on bridge, unsubscribed on dispose |
+
+---
+
+## Server (`@actdim/msgmesh-remote/server`)
+
+### `class RemoteMeshServer<TChannel, TGroup>`
+
+```typescript
+constructor(options: RemoteServerOptions<TChannel, TGroup>)
+readonly options: RemoteServerOptions<TChannel, TGroup>
+readonly codec: FrameCodec // options.codec ?? defaultCodec
+```
+
+| Member | Signature | Purpose |
+|---|---|---|
+| `handleConnection` | `(socket: RemoteSocket, context?: Partial<RemoteConnectionContext>): RemoteClientSession<TChannel, TGroup>` | Create a session, decode and dispatch its frames, clean up on `close` / `error` |
+| `broadcast` | `(channel: TChannel, payload?: unknown, topic?: string, group?: string): void` | Send `MSG` to every session subscribed to the address (no `filterEvent`) |
+| `activeSessionsCount` | `get: number` | Number of live sessions |
+| `close` | `(): void` | Close every session and its socket |
+
+### `class RemoteClientSession<TChannel, TGroup>`
+
+Created by `handleConnection`; one per socket.
+
+| Member | Signature | Purpose |
+|---|---|---|
+| `context` | `readonly RemoteConnectionContext` | Connection identity; `connectionId` defaults to `conn-<random>` |
+| `socket` | `readonly RemoteSocket` | Underlying socket |
+| `send` | `(frame: RemoteFrame<TChannel>): void` | Encode and send a frame (no-op after `close`) |
+| `isSubscribed` | `(channel: string, topic?: string, group?: string): boolean` | Wildcard-aware subscription match |
+| `handleFrame` | `(frame: RemoteFrame<TChannel>): Promise<void>` | Dispatch one decoded frame (auth, authorize, `PING`, `SUB`, `UNSUB`, `MSG`, `REQ`) |
+| `close` | `(): void` | Abort all bus listeners and clear subscriptions |
+
+### `interface RemoteConnectionContext`
+
+```typescript
+interface RemoteConnectionContext {
+    connectionId: string;
+    userId?: string;
+    metadata?: Record<string, unknown>;
+}
+```
+
+### `interface RemoteServerOptions<TChannel, TGroup>`
+
+| Option | Signature | Purpose |
+|---|---|---|
+| `bus` | `RemoteServerBusLike<TChannel, TGroup>` | Required. Target of `MSG` / `REQ`, source of forwarded events |
+| `codec` | `FrameCodec` | Frame serialization (default `defaultCodec`) |
+| `resolveChannels` | `(channelPattern: string) => TChannel[]` | Expand a `SUB` / `UNSUB` channel (pattern) into bus channels |
+| `onAuthenticate` | `(token, context) => result \| Promise<result>` where `result` is `{ userId?, metadata? } \| boolean \| null` | Validate `AUTH` tokens |
+| `authorize` | `(context, frame: RemoteFrame<TChannel>) => boolean \| Promise<boolean>` | Gate every non-`AUTH` frame |
+| `filterEvent` | `(context, channel: string, payload: unknown, topic?: string, group?: string) => boolean` | Per-session event visibility (replaces the default owner filter) |
+| `logger` | `{ debug?, info?, warn?, error? }` | Optional logger |
+
+---
+
+## Protocol (`@actdim/msgmesh-remote/protocol`)
+
+### Errors
+
+| Class | Constructor | Thrown when |
+|---|---|---|
+| `FrameDecodeError` | `(message: string, cause?: unknown)` | Raw data is not a string / `Uint8Array`, or JSON parsing fails |
+| `InvalidFrameError` | `(message: string)` | Parsed value is not a valid frame |
+
+Messages are prefixed with `[msgmesh-remote] Frame decode error:` and `[msgmesh-remote] Invalid frame:`.
+
+### Validation and codec
+
+| Export | Signature | Purpose |
+|---|---|---|
+| `validateFrame` | `(data: unknown): RemoteFrame` | Check type-specific required fields; throws `InvalidFrameError` |
+| `JsonFrameCodec` | `class implements FrameCodec` | `encode(frame): string`, `decode(raw: string \| Uint8Array): RemoteFrame` |
+| `defaultCodec` | `JsonFrameCodec` instance | Shared default codec |
+
+### Frame factories
+
+Optional arguments that are `undefined` are omitted from the frame.
+
+| Function | Signature |
+|---|---|
+| `createSubFrame` | `<TChannel>(channel: TChannel, topic?: string, group?: string): RemoteSubFrame<TChannel>` |
+| `createUnsubFrame` | `<TChannel>(channel: TChannel, topic?: string, group?: string): RemoteUnsubFrame<TChannel>` |
+| `createMsgFrame` | `<TChannel, TPayload>(channel: TChannel, payload?: TPayload, topic?: string, group?: string): RemoteMsgFrame<TChannel, TPayload>` |
+| `createReqFrame` | `<TChannel, TPayload>(id: string, channel: TChannel, payload?: TPayload, topic?: string, group?: string): RemoteReqFrame<TChannel, TPayload>` |
+| `createResFrame` | `<TPayload, TError>(id: string, payload?: TPayload, error?: TError): RemoteResFrame<TPayload, TError>` (if `error` is defined, `payload` is dropped) |
+| `createPingFrame` | `(): RemotePingFrame` |
+| `createPongFrame` | `(): RemotePongFrame` |
+| `createAuthFrame` | `(token: string, metadata?: Record<string, unknown>): RemoteAuthFrame` |
+| `createAuthOkFrame` | `(userId?: string): RemoteAuthOkFrame` (empty `userId` omitted) |
+| `createAuthFailFrame` | `(error: string, code?: number): RemoteAuthFailFrame` |
+
+Note the argument order: `topic` comes before `group` in every factory and in the client methods.
+
+---
+
+## Types (`@actdim/msgmesh-remote/types`)
+
+| Type | Kind | Summary |
+|---|---|---|
+| `RemoteFrameType` | union | `'SUB' \| 'UNSUB' \| 'MSG' \| 'REQ' \| 'RES' \| 'PING' \| 'PONG' \| 'AUTH' \| 'AUTH_OK' \| 'AUTH_FAIL'` |
+| `RemoteSubFrame<TChannel>` | type | `{ t: 'SUB'; channel; group?; topic? }` |
+| `RemoteUnsubFrame<TChannel>` | type | `{ t: 'UNSUB'; channel; group?; topic? }` |
+| `RemoteMsgFrame<TChannel, TPayload>` | type | `{ t: 'MSG'; channel; group?; topic?; payload? }` |
+| `RemoteReqFrame<TChannel, TPayload>` | type | `{ t: 'REQ'; id; channel; group?; topic?; payload? }` |
+| `RemoteResFrame<TPayload, TError>` | type | `{ t: 'RES'; id; payload?; error? }` |
+| `RemotePingFrame` / `RemotePongFrame` | type | `{ t: 'PING' }` / `{ t: 'PONG' }` |
+| `RemoteAuthFrame` | type | `{ t: 'AUTH'; token; metadata? }` |
+| `RemoteAuthOkFrame` | type | `{ t: 'AUTH_OK'; userId? }` |
+| `RemoteAuthFailFrame` | type | `{ t: 'AUTH_FAIL'; error; code? }` |
+| `RemoteFrame<TChannel, TPayload, TError>` | union | All ten frame types |
+| `FrameCodec` | interface | `encode(frame): string \| Uint8Array`, `decode(raw): RemoteFrame` |
+| `RemoteSocket` | interface | `send(data)`, `on('message' \| 'close' \| 'error', listener)`, `close(code?, reason?)` |
+| `RemoteServerBusLike<TChannel, TGroup>` | interface | Optional `send`, `request`, `on` |
+| `RemoteBusLike<TChannel, TGroup>` | interface | `RemoteServerBusLike` + optional `provide` |
+
+Field-level details and validation rules: [Domain Model](./topic--domain-model.md).
+
+---
+
+## Package Scripts
+
+See [Setup & Workflow](./topic--setup-and-workflow.md).
+
+---
+
+[<- Back to 04. Integration Guide](./topic--04-integration-guide.md) | [Back to Main README](../README.md)
+
+---
+
+## Document: docs/topic--along-protocol.md (Along Protocol Reference)
+
+<!-- ALONG-PROTOCOL-REFERENCE (managed by along-init - do not edit by hand) -->
+
+# Along Protocol Reference
+
+The managed block in `AGENTS.md` is the always-loaded core of the ALONG-PROTOCOL: where state lives, how work is anchored to an issue, and the list of gates. This article carries the situational procedure the core points to. Pull the section you need with `/along-kb-search` instead of reading the whole file. `along init` and `along update` regenerate this file from the installed protocol; repository-specific guidance belongs in its own `docs/topic--<slug>.md` article or in `AGENTS.md` "Project specifics".
+
+## Scope, Precedence & Subproject Placement
+
+- **Nearest Context Boundary**: Any folder may carry its own `AGENTS.md` + `.along/`; use the NEAREST ones for the area you're working in. On conflict, the more specific wins.
+- **Subproject Localization** [gate: subproject-boundary]: In submodules, nested repos or symlinked folders: all entities (issues, sessions, ADRs, history) MUST be created in the NEAREST `.along/`. Agents are STRICTLY FORBIDDEN from dumping subproject changes into the workspace root `.along/`.
+- **Multi-Subproject Work** [gate: subproject-boundary]: A change spanning subprojects needs an issue in each touched `.along/`, or a root umbrella issue whose child issues there carry `parent: <umbrella key>`. Edits under a subproject `.along/` are checked by path.
+- **Subproject Boundary**: only a nested `.git` or a user-run `along init` makes a subproject; never init a manifest folder.
+- **Precedence**: Nearest `.along/` > higher-level `.along/` > global config (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.gemini/config/GEMINI.md`).
+
+## Session Start
+
+Use the NEAREST `.along/` for the area you're working in (fall back to a higher-level one if the folder has none). These files are NOT auto-loaded; read them yourself:
+
+1. `AGENTS.md` (nearest) - conventions to follow.
+2. `.along/ISSUES.md` - active issue board (or query `/along-kb-search`).
+3. `.along/CONSTRAINTS.md` - active architectural constraints (or full log in `.along/DECISIONS.md` / `.along/DECISIONS/`).
+4. Active Issue file `.along/ISSUES/<type>--<slug>.md` for your task.
+
+Also, when relevant: `.along/VISION.md`, `.along/GLOSSARY.md`. These reflect the state WHEN WRITTEN - verify any named file/API/flag against the real code first.
+
+## Multi-Agent & Multi-Branch Concurrency
+
+- **Zero-Manual-Merge Rule** [gate: projection-protection]: On merge conflicts in derived projections (`ISSUES.md`, `INDEX.md`, `DECISIONS.md`), accept either side and run `/along-issue-sync`, `/along-kb-sync`, or `/along-decision-sync` to recompile. `along git setup` registers merge drivers that do this automatically; afterwards run `along git sync`.
+- **Append-Only Merge Driver**: `.along/HISTORY.md` and legacy monolithic `.along/DECISIONS.md` are append-only. Configure `.gitattributes` with `merge=union`. Modular ADR files in `.along/DECISIONS/` are isolated per-file to eliminate merge collisions.
+- **Untracked Exports** [gate: untracked-exports]: `.along/dashboard.html`, `.along/DASHBOARD.md` and per-machine `.along/diagnostics/` stay out of Git.
+- **Context Isolation**: Context is localized to the target issue file, session-scoped blackboard (`.along/.session/<slug>/`), and completed session logs.
+- **Parallel Closeout**: `along session list`; on the user's yes `along plan approve --closeout --ready`, then `along session close --ready`.
+
+## Issue Anchoring & Commits
+
+- **No Code Without Issue** [gate: require-active-issue]: Before modifying source code, agents MUST identify or create an issue in `.along/ISSUES/<type>--<slug>.md` and set `status: in-progress`.
+- **Session Binding & Plan Approval** [gate: require-plan-approval]: `along start <slug>` binds THIS agent session to the issue; parallel sessions keep their own bindings. Source edits unlock after the user approves the plan (`EnterPlanMode` -> `ExitPlanMode`; outside plan mode, write the plan to a file and run `along plan approve --plan-file <path>` after the user's explicit yes). `along plan status` shows the binding.
+- **Exemptions**: Read-only Q&A and 1-line micro-edits (typo fixes, comments) do not require issues.
+- **Inquiry Read-Only Invariance (Zero-Mutation Rule on Questions)** [gate: require-plan-approval]: On interrogative prompts ("is X done?", "why did Y fail?"), write/modify tools are STRICTLY PROHIBITED. Return a read-only audit report and ask for confirmation before modifying anything.
+- **Commit Binding** [gate: commit-issue-binding]: Every commit via `/along-commit` MUST bind to the active issue slug.
+- **No AI Co-Authors**: Commit messages MUST NOT carry `Co-Authored-By:` trailers naming an AI agent (GitHub lists the vendor as a contributor). `along hook install` turns runtime attribution off; opt out via `.along/config.json` `commits.allow_ai_coauthor: true`.
+
+## Issue Plans & Approving Ahead
+
+- **Plan location**: An issue's plan lives next to its ticket in `.along/ISSUES/<key>/plan.md` (committed; moves with the ticket to `done/` and on rename). It is one living file: the approved baseline, then each correction appended as `## Revision N (date, source)` with a `Reason:` line. `along-team` writes its Living Plan there too; blackboards without an issue keep `.along/.session/<slug>/plan.md`.
+- **Plan status** (ticket front-matter `plan_status`, shown on the board): `needs-approval` (written, waiting for the user), `approved` (ready to run), `needs-rework` (cannot be followed within the ticket). Agents may set `needs-approval` / `needs-rework`; only `along plan approve`, after the user's explicit yes, sets `approved` [gate: require-plan-approval]: a file-tool edit that sets it is denied, a shell write is reported at Stop.
+- **Approve ahead**: Write the plan (plan mode, or a file), show it, and after the user's yes run `along plan approve <slug>` (`--plan-file <path>` outside plan mode) before `along start`. The issue is not started; the ticket says `plan_status: approved` and the CLI logs the approval in `.along/.session/plan-approvals.jsonl` (machine-local, closed to file tools). A later `along start <slug>`, by the user, the agent, or the orchestrator / runner daemon, runs the plan with no second approval and no re-planning (the orchestrator skips its architect).
+- **Approved elsewhere**: `approved` in the ticket with no approval logged on this machine (approved on another machine, or written by hand) is not trusted: show the plan and ask once in the current channel (chat, or the daemon's Telegram reply); the orchestrator stops with `needs-input`.
+- **Plans change during work; escalate only past the ticket**: Once approved, the plan belongs to the agents. A deviation they can resolve while still meeting the ticket's requirements and acceptance criteria is resolved on the spot and recorded (`along plan revise <slug> --plan-file <path> --reason "..."`); no one is asked and the status stays `approved`. Only a problem the ticket cannot absorb (a requirement cannot be met or must change, a decision only the user can make) goes to the user: `along plan rework <slug> --reason "..."`, stop, ask. In `along-team`, implementer and reviewer report plan problems to the supervisor, the architect revises, and only a ticket-level problem halts the run. Plans are not checked for staleness: a plan stays valid until the work shows otherwise.
+
+## Entity Ecosystem
+
+- **Entity types**: Issues (`feat`, `bug`, `debt`, `task`, `docs`, `spike`), Decisions (ADRs), Milestones, Sessions. A risk or blocker is an issue tagged `risk`; a spike is a `spike--<slug>` issue with an `## Outcome` section. Full YAML schemas: `docs/topic--domain-model.md`.
+- **Canonical keys**: `<type>--<slug>` (e.g. `feat--token-refresh`). Reference by key, NEVER by file path.
+- **ADRs**: Modular records in `.along/DECISIONS/ADR-YYYY-MM-DD--<slug>.md` (with legacy fallback to monolithic `DECISIONS.md`). Never edit past entries - mark superseded. Recompile projections (`.along/DECISIONS.md` board and `.along/CONSTRAINTS.md`) via `/along-decision-sync` or `along decision sync`. Create new ADRs via `/along-decision-sync` or `along decision create <slug> --title "..."`. Add terms to `.along/GLOSSARY.md`.
+- **Issue lifecycle** [gate: issue-lifecycle]: Complete active issues via `along wrap <slug>` (or `along issue done <slug> --status cancelled|superseded`). Closing as done requires `validate_issue_completion` (no scaffold placeholders, mandatory Acceptance Criteria, all `- [x]` closed).
+- **Entity references** [gate: entity-reference-integrity] [gate: entity-deletion-protection]: Never delete an entity other entities reference; use `along issue rename` / `along issue supersede`.
+- **Auto-entity creation**: Agents MUST automatically detect user intent (build/fix/refactor -> Issue, blocked/rate-limit -> Issue tagged `risk`, compare/benchmark -> `spike` Issue, release/sprint -> Milestone) and create entities without prompting the user.
+
+## Knowledge Base & Documentation
+
+- **Stable Entry Point**: `README.md` and `docs/` never link into `.along/`; route through `docs/INDEX.md` or `docs/topic--<slug>.md`.
+- **Portable Links**: Relative Markdown links only.
+- **Fact Grounding**: Agents MUST extract facts from actual code, `README.md`, `docs/`, and `package.json`. Generic LLM placeholders are strictly prohibited.
+- **Fast Retrieval**: Agents SHOULD query `/along-kb-search` before reading whole documentation files.
+- **Doc Blast Radius**: After non-trivial code changes, agents MUST map affected symbols to `docs/topic--*.md` articles and update them before completing the task.
+- **Manual Document Lock** [gate: doc-manual-lock]: Documents marked with `write_policy: manual` (or `locked: true`) are protected from automated agent modification during blast radius sweeps. Modifications require an explicit documentation issue (`docs--<slug>`).
+- **Managed Rule Packs** [gate: rule-pack-protection]: Never edit `.along/rules/**/*.md`; `along rules attach` owns them. Project guidelines go to `docs/topic--<slug>.md` or "Project specifics"; revert with `along rules restore`. `.along/rules/gates.yaml` and `.along/scripts/` stay repo-owned.
+
+### Documentation Routing Tree
+
+[gate: doc-routing-compliance]
+
+- Architectural choice / trade-off -> `.along/DECISIONS/` (ADR)
+- Public overview / pitch / landing page -> `README.md`
+- Technical interface contract / CLI spec -> `docs/topic--<slug>.md` (`type: reference`)
+- Conceptual explanation / comparison / philosophy -> `docs/topic--<slug>.md` (`type: explanation`, `write_policy: manual`)
+- Procedural walkthrough / runbook -> `docs/topic--<slug>.md` (`type: guide`)
+
+## While Working
+
+- **Token hygiene**: Use quiet flags (`pytest -q`, `dotnet test -v q`), filter outputs, inspect targeted line ranges.
+- **Lifecycle hooks first**: Agents MUST use `/along-test`, `/along-build`, `/along-dev` (or `.along/scripts/*.py`) before raw shell commands.
+- **Post-change review**: Agents MUST inspect diffs and evaluate blast radius via `along graph-impact` (or static search fallback). Silent skips are forbidden.
+
+## Stage & Session Completion Checklist
+
+When a stage or session completes, agents MUST execute in this order:
+1. [ ] **Tests** [gate: test_before_stop]: Run via `/along-test` with quiet flags. Zero failures.
+2. [ ] **File Integrity**: `git status -u` - all new/modified files non-zero size, no empty placeholders.
+3. [ ] **Code Review**: Inspect diff for side effects, verify REQ-N coverage, evaluate blast radius via `along graph-impact` (or static search), verify architectural decision compliance.
+4. [ ] **Entity Reconciliation**: Close issues (`done` + move to `done/`), update milestones, record the `## Outcome` of a spike. [gate: unresolved_gate_denial]: every tool call a gate denied is redone within the gate's rules or disclosed (`along gates denials`, `along gates ack <id> --note "..."`); `along wrap` / `along issue done` refuse until the user has replied to a disclosure (`--force-reason` after their reply).
+5. [ ] **Doc Blast Radius**: Update affected `docs/topic--*.md`, `README.md` and Project specifics; add new terms to `.along/GLOSSARY.md` (create it on first use); touch `.along/VISION.md` only if scope/roadmap changed; run `/along-kb-sync`.
+6. [ ] **Session Log & Wrap** [gate: wrap_before_stop]: `along wrap <slug> --summary "<summary>" (--decisions <ADR...> | --no-decisions)` writes `.along/SESSIONS/<YYYY>/<date>--<slug>.md` (summary, decisions, attributed `files:`, blackboard record), compiles projections, and appends to `.along/HISTORY.md` (provide `--summary` or let it fallback to issue title).
+7. [ ] **Projections** [gate: projection_sync_before_stop]: Run `/along-issue-sync` and `/along-decision-sync`.
+8. [ ] **HISTORY**: Verify line in `.along/HISTORY.md` (appended automatically by `along wrap`; update via `along history append <slug> "..."` if needed).
+9. [ ] **Compaction**: Advise user to run `/compact`.
+
+## Multi-Agent Routing
+
+- **Mandatory Adaptive Complexity Escalation & Execution Mode Routing**: When scope touches > 3 files, crosses subsystems, or refactors core engines: single-agent execution is forbidden - route to `along-team`. Plans MUST declare `Execution Mode: Direct` or `Role-Based`. Role-based blackboards (`along scratch init`) are held to the step loop [gate: team-step-active] [gate: team-reviews-before-stop]; dropping it needs `along scratch fallback <slug> --reason "..."`.
+
+## Tool-Use Rules
+
+- **Contract-First Lifecycle**:
+  - Agents MUST execute `.along/scripts/<action>.py` or `/along-test`, `/along-build`, `/along-dev` before raw shell commands.
+  - When `.along/scripts/` is missing, `along test`/`along build` auto-detects and synthesizes hooks.
+  - In submodules, execute the hook from that subproject's own `.along/scripts/`.
+- **Environment Isolation**:
+  - Agents MUST NOT install system-wide or global packages when a script fails. Fix the architecture (missing `bootstrap.ensure_deps()`, incorrect `uv` wrapper), not the environment.
+- **Workspace Containment** [gate: workspace-containment]: Read and write only inside the workspace. Writes elsewhere are limited to the temp dir and runtime artifact dirs. Other repos need `allowed_roots` (`.along/rules/gates.yaml`, issue frontmatter, `along start --allow-root`). Never touch credential stores (`~/.ssh`, `~/.aws`).
+- **Runtimes Without Along Hooks** (Claude Cowork, Cursor, OpenCode, plain shells): gates are advisory there. Agents MUST self-apply every gate-tagged rule and use the `along` CLI for tests, commits, entity changes, and wrap instead of raw tools. `along doctor` reports the enforcement level.
+- **File Modification & Anti-Deletion**:
+  - Never delete, truncate, or overwrite existing documentation, comments, or code unless explicitly instructed.
+  - After batch edits or migrations, agents MUST run `git diff --stat` and inspect unexpected size reductions.
+  - No stubs or skeletons in place of populated code.
+  - Anchor edits on minimal unique chunks. Restore unintended deletions immediately.
+- **Clean ASCII**: ASCII punctuation only (no typographic dashes, quotes, ellipsis, bullets, NBSP/zero-width chars or BOM); `along sanitize --write` fixes them.
+- **Markdown**: Every code fence names a language.
+- **Commit-time checks**: typography, code fences, links, filenames, secrets, stubs and AI co-authors are checked by `along lint` (pre-commit and CI), not while you work.
+- **Bypass Is The User's Call**: `-n`, `--force-reason`, `scratch fallback` need `--reason` and the user's reply after the failure; each bypass is recorded (`along gates stats`).
+- **File Content Via Tools Only** [gate: cli_safety]: Create/edit files with the agent's file tools. NEVER carry content in heredocs, `python -c`, or inline shell. Write scripts to a file first.
+- **No Ad-Hoc Shell Code Probing**: Agents must never use `python -c` or inline shell commands to probe internal module symbols or inspect functions. Internal engine packages (`alongkit`, `scripts`) are not installed into the global Python environment, and ad-hoc shell probing produces confusing error traces instead of actionable information. Prescribed inspection tools: static file tools (`view_file`, `grep_search`), AST tools (`along graph-*`), official CLI subcommands (`along <command> --help`), or dedicated hermetic tests in `tests/`.
+- **CLI Black-Box Invariance**: Agents MUST treat the Along CLI and development tools as strict opaque black-box executables. Reading Along engine source code (`.along/bin/*.py`, `~/.along/bin/`, `alongkit/**`, `along_*.py`) to inspect internals, arguments, or data structures is STRICTLY FORBIDDEN unless working on the Along repository itself. Always use `along <command> --help` or official documentation in `docs/`. If an Along command returns an error or fails validation, report the exact CLI error output to the user immediately. Do not attempt to reverse-engineer or debug the Along engine.
+- **Verify Written Files**: After writing/patching, confirm parsing (`python -m compileall -q`, `bash -n`, etc.) before moving on.
+- **Hermetic Tests**: Tests MUST target throwaway fixtures (`tempfile.mkdtemp()`), never the live repository. Read-only access to live state is allowed. Keep a meta-test that verifies `git status --porcelain -u` stays clean.
+- Windows-safe filenames: dates `YYYY-MM-DD`, date first.
+- Keep `ISSUES.md` compact: `along context-budget --check` enforces the limit.
+- Never write secrets into tracked files.
+
+---
+
+## Document: docs/topic--architecture.md (Architecture)
+
+# @actdim/msgmesh-remote Architecture
+
+## 1. System Overview
+
+`@actdim/msgmesh-remote` bridges two `@actdim/msgmesh` buses over a duplex socket. It is layered so that each layer can be used on its own: the protocol layer has no runtime state, the server and client depend only on the protocol layer and on structural "bus-like" and "socket" interfaces.
+
+```text
++-------------------------------------------------------------------------------------------+
+|                                  @actdim/msgmesh-remote                                   |
++-------------------------------------------------------------------------------------------+
+|  Type Contracts (src/types.ts, zero runtime)                                              |
+|  - RemoteFrame union: SUB, UNSUB, MSG, REQ, RES, PING, PONG, AUTH, AUTH_OK, AUTH_FAIL     |
+|  - FrameCodec, RemoteSocket, RemoteServerBusLike, RemoteBusLike                           |
++-------------------------------------------------------------------------------------------+
+|  Protocol (src/protocol.ts, entry ./protocol)                                             |
+|  - validateFrame, JsonFrameCodec, defaultCodec                                            |
+|  - FrameDecodeError, InvalidFrameError, create*Frame factories                            |
++-------------------------------------------------------------------------------------------+
+|  Server (src/server.ts, entry ./server)          |  Client (src/client.ts, entry ./client)|
+|  - RemoteMeshServer: session registry,           |  - RemoteMeshClient: state machine,    |
+|    broadcast, close                              |    heartbeat, backoff reconnect,       |
+|  - RemoteClientSession: AUTH, authorize,         |    subscription replay, offline queue, |
+|    SUB/UNSUB -> bus.on, MSG -> bus.send,         |    REQ/RES correlation, authenticate   |
+|    REQ -> bus.request, event filtering           |  - bridgeRemoteBus / attachToBus       |
++-------------------------------------------------------------------------------------------+
+|  Host integration (application code)                                                      |
+|  - Server: WebSocket route (e.g. @fastify/websocket) -> server.handleConnection(socket)   |
+|  - Client: local msgmesh bus <- bridgeRemoteBus -> RemoteMeshClient(url | socketFactory) |
++-------------------------------------------------------------------------------------------+
+```
+
+## 2. Core Architectural Principles
+
+### 2.1. Same Addressing on Both Sides
+Frames carry msgmesh's `channel` / `group` / `topic` address verbatim. The server translates frames into `bus.send`, `bus.request` and `bus.on` calls; the client bridge translates incoming `MSG` frames into `bus.send` and local `bus.provide` calls into `REQ` frames.
+
+### 2.2. Structural Dependencies Only
+The runtime never imports `@actdim/msgmesh`. It calls optional methods on `RemoteServerBusLike` / `RemoteBusLike` and on a duck-typed `RemoteSocket`, so hosts can use any socket library and tests can use object literals.
+
+### 2.3. Client Owns Resilience
+Liveness detection (`PING` / `PONG`), reconnect backoff, subscription replay and offline buffering live in the client. The server is reactive: it answers `PING` and cleans up a session when its socket emits `close` or `error`.
+
+### 2.4. Server Owns Policy
+Identity (handshake context, `onAuthenticate`), access control (`authorize`) and event visibility (`filterEvent` or the default owner filter) are server-side hooks evaluated per session.
+
+## 3. Detailed Flows
+
+Sequence diagrams for connect/auth, RPC, pub/sub, fire-and-forget and heartbeat are in [03. Architecture & Wiring](./topic--03-architecture-and-wiring.md).
+
+## 4. Cross-Links
+
+- [Knowledge Base Index](./INDEX.md) - Knowledge Base Root
+- [Overview & Advantages](./topic--01-overview-and-advantages.md) - What the package is and why
+- [Core Concepts](./topic--02-core-concepts.md) - Addressing, frames, lifecycle, auth
+- [Architecture & Wiring](./topic--03-architecture-and-wiring.md) - Sequence diagrams and bridge wiring
+- [Integration Guide](./topic--04-integration-guide.md) - Server and client setup
+- [API Reference](./topic--05-api-reference.md) - Every public export
+- [Domain Model](./topic--domain-model.md) - Frame and contract reference
+- [Setup & Workflow](./topic--setup-and-workflow.md) - Build, test and docs scripts
+- [License](./topic--license.md) - License Information
+
+---
+
+## Document: docs/topic--domain-model.md (Domain Model)
+
+# @actdim/msgmesh-remote Domain Model & Protocol Contracts
+
+## 1. Domain Overview
+
+The domain of `@actdim/msgmesh-remote` is the **wire frame**: a JSON object discriminated by `t`. Around it sit the contracts for serialization (`FrameCodec`), transport (`RemoteSocket`), the buses on each side (`RemoteServerBusLike`, `RemoteBusLike`) and the server's per-connection identity (`RemoteConnectionContext`). All types live in `src/types.ts` except `RemoteConnectionContext` (`src/server.ts`) and the client option types (`src/client.ts`).
+
+## 2. Frames
+
+### 2.1. Subscription frames (client -> server)
+
+```typescript
+type RemoteSubFrame<TChannel extends string = string> = {
+    t: 'SUB';
+    channel: TChannel;
+    group?: string;
+    topic?: string;
+};
+
+type RemoteUnsubFrame<TChannel extends string = string> = {
+    t: 'UNSUB';
+    channel: TChannel;
+    group?: string;
+    topic?: string;
+};
+```
+
+`channel` may be a pattern (`'*'` or a trailing `*` prefix); `topic` / `group` may be `'*'`. Example: `{ "t": "SUB", "channel": "JOBS.STATUS", "topic": "job-42" }`.
+
+### 2.2. Message frame (both directions)
+
+```typescript
+type RemoteMsgFrame<TChannel extends string = string, TPayload = unknown> = {
+    t: 'MSG';
+    channel: TChannel;
+    group?: string;
+    topic?: string;
+    payload?: TPayload;
+};
+```
+
+Client -> server: forwarded to `bus.send`. Server -> client: an event the session is subscribed to.
+
+### 2.3. RPC frames
+
+```typescript
+type RemoteReqFrame<TChannel extends string = string, TPayload = unknown> = {
+    t: 'REQ';
+    id: string;
+    channel: TChannel;
+    group?: string;
+    topic?: string;
+    payload?: TPayload;
+};
+
+type RemoteResFrame<TPayload = unknown, TError = unknown> = {
+    t: 'RES';
+    id: string;
+    payload?: TPayload;
+    error?: TError;
+};
+```
+
+`id` correlates a `RES` with its `REQ`. A `RES` has either `payload` or `error`. Error payloads produced by the server:
+
+| Situation | `error` value |
+|---|---|
+| `authorize` denied a `REQ` | `{ message: 'Unauthorized', code: 403 }` |
+| Server bus has no `request` | `{ message: 'Server bus has no request provider' }` |
+| `bus.request` threw an `Error` | `{ message, name, ...ownEnumerableProps }` |
+| `bus.request` threw a non-`Error` object | its own enumerable properties |
+| `bus.request` threw a primitive | `{ message: String(err) }` |
+
+### 2.4. Heartbeat frames
+
+```typescript
+type RemotePingFrame = { t: 'PING' };
+type RemotePongFrame = { t: 'PONG' };
+```
+
+Either side answers `PING` with `PONG`; only the client sends `PING` on a timer.
+
+### 2.5. Authentication frames
+
+```typescript
+type RemoteAuthFrame = { t: 'AUTH'; token: string; metadata?: Record<string, unknown> };
+type RemoteAuthOkFrame = { t: 'AUTH_OK'; userId?: string };
+type RemoteAuthFailFrame = { t: 'AUTH_FAIL'; error: string; code?: number };
+```
+
+Server codes: `401` for a falsy `onAuthenticate` result, `500` when `onAuthenticate` throws. `RemoteAuthFrame.metadata` is part of the frame contract; the server's `handleAuth` passes only `token` and the session context to `onAuthenticate`, and the client's automatic and explicit `AUTH` frames carry no metadata.
+
+### 2.6. Union and type tag
+
+```typescript
+type RemoteFrameType = 'SUB' | 'UNSUB' | 'MSG' | 'REQ' | 'RES' | 'PING' | 'PONG' | 'AUTH' | 'AUTH_OK' | 'AUTH_FAIL';
+
+type RemoteFrame<TChannel extends string = string, TPayload = unknown, TError = unknown> =
+    | RemoteSubFrame<TChannel>
+    | RemoteUnsubFrame<TChannel>
+    | RemoteMsgFrame<TChannel, TPayload>
+    | RemoteReqFrame<TChannel, TPayload>
+    | RemoteResFrame<TPayload, TError>
+    | RemotePingFrame
+    | RemotePongFrame
+    | RemoteAuthFrame
+    | RemoteAuthOkFrame
+    | RemoteAuthFailFrame;
+```
+
+## 3. Validation Rules (`validateFrame`)
+
+| `t` | Required | Optional, type-checked |
+|---|---|---|
+| `SUB`, `UNSUB`, `MSG` | `channel`: non-empty string | `group`, `topic`: string |
+| `REQ` | `id`, `channel`: non-empty strings | `group`, `topic`: string |
+| `RES` | `id`: non-empty string | - |
+| `PING`, `PONG` | - | (returned as a fresh `{ t }` object; extra fields dropped) |
+| `AUTH` | `token`: non-empty string | - |
+| `AUTH_OK` | - | - |
+| `AUTH_FAIL` | `error`: non-empty string | - |
+
+Anything else (non-object, missing or unknown `t`) throws `InvalidFrameError`. `payload`, `error`, `metadata`, `userId` and `code` are not type-checked; other frames are returned as received, extra fields included.
+
+## 4. Infrastructure Contracts
+
+### 4.1. `FrameCodec`
+
+```typescript
+interface FrameCodec {
+    encode(frame: RemoteFrame): string | Uint8Array;
+    decode(raw: string | Uint8Array): RemoteFrame;
+}
+```
+
+### 4.2. `RemoteSocket`
+
+```typescript
+interface RemoteSocket {
+    send(data: string | Uint8Array): void;
+    on(event: 'message', listener: (data: unknown) => void): void;
+    on(event: 'close', listener: (code?: number, reason?: string) => void): void;
+    on(event: 'error', listener: (err: unknown) => void): void;
+    close(code?: number, reason?: string): void;
+}
+```
+
+### 4.3. Bus-like contracts
+
+```typescript
+interface RemoteServerBusLike<TChannel extends string = string, TGroup extends string = string> {
+    send?(msg: { channel: TChannel; group?: TGroup; topic?: string; payload?: unknown }): Promise<unknown> | void;
+    request?(msg: { channel: TChannel; group?: TGroup; topic?: string; payload?: unknown }): Promise<unknown>;
+    on?(params: {
+        channel: TChannel;
+        group?: TGroup;
+        topic?: string;
+        options?: { abortSignal?: AbortSignal };
+        callback: (msg: {
+            address?: { channel: string; group?: string; topic?: string };
+            channel?: string;
+            group?: string;
+            topic?: string;
+            payload?: unknown;
+        }) => void;
+    }): (() => void) | void;
+}
+
+interface RemoteBusLike<TChannel extends string = string, TGroup extends string = string>
+    extends RemoteServerBusLike<TChannel, TGroup> {
+    provide?(params: {
+        channel: TChannel;
+        group?: TGroup;
+        callback: (inMsg: {
+            address?: { channel: string; group?: string; topic?: string };
+            channel?: string;
+            topic?: string;
+            group?: string;
+            payload?: unknown;
+        }) => Promise<unknown> | unknown;
+    }): (() => void) | void;
+}
+```
+
+Callbacks accept both msgmesh messages (address under `address`) and flat objects (address fields at top level).
+
+### 4.4. `RemoteConnectionContext`
+
+```typescript
+interface RemoteConnectionContext {
+    connectionId: string;          // handshake value or generated 'conn-<random>'
+    userId?: string;               // handshake value, replaced by onAuthenticate
+    metadata?: Record<string, unknown>; // handshake value, shallow-merged by onAuthenticate
+}
+```
+
+## 5. Runtime Entities
+
+| Entity | Lifetime | Key state |
+|---|---|---|
+| `RemoteMeshServer` | Application | Set of live sessions |
+| `RemoteClientSession` | One socket | `context`, subscriptions (`channel::group::topic`), bus listeners (`busChannel::topic` -> abort) |
+| `RemoteMeshClient` | Application | `ClientConnectionState`, subscription registry (`channel::group::topic`), offline `MSG` queue, pending requests by `id`, pending auth, heartbeat and reconnect timers |
+| Bridge disposer | Until called | Message listener, `provide` disposers, bridge subscriptions |
+
+## 6. Cross-Links
+
+- [Knowledge Base Index](./INDEX.md) - Knowledge Base Root
+- [Architecture](./topic--architecture.md) - System summary
+- [Core Concepts](./topic--02-core-concepts.md) - How the frames are used
+- [API Reference](./topic--05-api-reference.md) - Every public export
+
+---
+
+## Document: docs/topic--license.md (License)
+
+# License
+
+`@actdim/msgmesh-remote` is distributed under the **MIT License**.
+
+- Repository file: [LICENSE](https://github.com/actdim/msgmesh-remote/blob/main/LICENSE)
+
+## Summary of Terms
+
+- **Use, modification, distribution**: free for any purpose, including commercial use, modification, redistribution, sublicensing and sale.
+- **Condition**: the copyright notice and the permission notice must be included in all copies or substantial portions of the software.
+- **Warranty**: the software is provided "as is", without warranty of any kind.
+
+---
+
+## Full License Text
+
+```text
+MIT License
+
+Copyright (c) 2026 Pavel Borodaev
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+---
+
+## Document: docs/topic--setup-and-workflow.md (Setup And Workflow)
+
+# @actdim/msgmesh-remote Setup, Build & Test Workflow
+
+## 1. Repository Layout
+
+`@actdim/msgmesh-remote` has its own Git repository (`https://github.com/actdim/msgmesh-remote`) and is developed as a Git submodule of the mempart monorepo at `src/packages/msgmesh-remote`. The monorepo's pnpm workspace (`src/pnpm-workspace.yaml`, `packages/*` and `apps/*`) links it with its sibling `@actdim/msgmesh` (`src/packages/msgmesh`) and with the consumers `apps/server` and `apps/webapp`.
+
+```text
+msgmesh-remote/
+|-- src/            index.ts, types.ts, protocol.ts, server.ts, client.ts
+|-- tests/          protocol, server, client and integration Vitest suites
+|-- docs/           Knowledge Base (this folder) and the VitePress site config
+|-- packageConfig.ts         aliases, source file list and peer externals for Vite / Vitest
+|-- vite.config.ts           library build (ESM, preserveModules, .d.ts via vite-plugin-dts)
+|-- vitest.node.config.ts    Node test configuration
+|-- tsconfig*.json           base / build / dev project references
+```
+
+## 2. Prerequisites & Installation
+
+- **Package manager**: `pnpm` (the mempart workspace pins `pnpm@10.30.3`)
+- **TypeScript**: `^5.9.3`
+
+Inside the monorepo, install from `src/`:
+
+```bash
+pnpm install
+```
+
+Peer dependencies for consumers:
+
+```bash
+pnpm add @actdim/msgmesh-remote @actdim/msgmesh rxjs
+```
+
+## 3. Scripts
+
+Run from the package folder (`src/packages/msgmesh-remote`):
+
+| Command | Action | Description |
+|---|---|---|
+| `pnpm run build` | `tsc -b tsconfig.json && vite build` | Typecheck, then emit ESM modules (`dist/<module>.es.js`) and declarations (`dist/<module>.d.ts`) |
+| `pnpm run typecheck` | `tsc -b tsconfig.json` | Typecheck only |
+| `pnpm run test` | `npx vitest --config=vitest.node.config.ts --no-cache` | Run all `tests/**/*.test.ts` once in Node |
+| `pnpm run test:w` | `npx vitest --config=vitest.node.config.ts --watch` | Watch mode |
+| `pnpm run format` | `prettier --write .` | Format |
+| `pnpm run format:check` | `prettier --check .` | Check formatting |
+| `pnpm run docs:dev` | `vitepress dev docs` | Local docs site |
+| `pnpm run docs:build` | `vitepress build docs` | Build the docs site (GitHub Pages: https://actdim.github.io/msgmesh-remote/) |
+| `pnpm run docs:preview` | `vitepress preview docs` | Preview the built docs |
+
+From the monorepo root (`src/`), `pnpm build` runs every workspace package's `build` script, including this one.
+
+## 4. Test Suites
+
+| File | Covers |
+|---|---|
+| `tests/protocol.test.ts` | Encode/decode of every frame type, `Uint8Array` input, invalid JSON, unknown type, missing fields |
+| `tests/server.test.ts` | `PING` -> `PONG`, `AUTH` success/failure, `REQ` -> `RES`, wildcard channel subscriptions, default tenant isolation, cleanup on close |
+| `tests/client.test.ts` | `AUTH` on open, `authenticate()` resolve/reject, heartbeat and dead-socket termination, offline queue flush, `bridgeRemoteBus` |
+| `tests/integration.test.ts` | Real client and server over an in-memory socket pair: RPC, pub/sub, offline buffering |
+
+The client tests use Vitest fake timers; all suites are hermetic (no network).
+
+Mempart also exercises the package end to end against a real Fastify WebSocket server in `apps/server/src/testRemoteMeshWebSocket.ts` and against the app bus in `apps/webapp/tests/remoteClient.test.ts`.
+
+## 5. Versioning & Release
+
+The mempart monorepo uses one synchronized version for all apps, packages and submodules. The package version (currently `1.12.0`) is never bumped in isolation: run `pnpm run version:sync <version>` from mempart's `src/` (it updates this package's `package.json` together with the others), then commit, tag `vX.Y.Z` and push the root repository and all submodules together. The `@actdim/msgmesh` peer range tracks the same version line (`>=1.12.0`).
+
+The published tarball contains `dist`, `docs` (without `docs/.vitepress`), `README.md`, `LICENSE`, `AGENTS.md`, `CLAUDE.md`, `llms.txt` and `llms-full.txt` (see `files` in `package.json`).
+
+## 6. Cross-Links
+
+- [Knowledge Base Index](./INDEX.md) - Knowledge Base Root
+- [Architecture](./topic--architecture.md) - Architecture
+- [Domain Model](./topic--domain-model.md) - Domain Model
+- [Integration Guide](./topic--04-integration-guide.md) - Integration Guide
+- [API Reference](./topic--05-api-reference.md) - API Reference
+- [License](./topic--license.md) - License Information
