@@ -1,6 +1,6 @@
 {
     "name": "@actdim/msgmesh-remote",
-    "version": "1.12.1",
+    "version": "1.12.2",
     "description": "Bidirectional remote transport, WebSocket bridge, and reconnect orchestration for @actdim/msgmesh.",
     "author": "Pavel Borodaev",
     "license": "MIT",
@@ -89,11 +89,11 @@
         "docs:preview": "vitepress preview docs"
     },
     "peerDependencies": {
-        "@actdim/msgmesh": ">=1.12.1",
+        "@actdim/msgmesh": ">=1.12.2",
         "rxjs": ">=7.8.0"
     },
     "devDependencies": {
-        "@actdim/msgmesh": ">=1.12.1",
+        "@actdim/msgmesh": ">=1.12.2",
         "@types/node": "^24.10.0",
         "prettier": "^3.5.3",
         "rxjs": "^7.8.2",
