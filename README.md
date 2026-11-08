@@ -133,6 +133,11 @@ Developed with [Along](https://github.com/actdim/along) - a provider-agnostic co
 
 ## Changelog
 
+### 1.14.0 (2026-11-08)
+- Standardized GitHub Pages CI and VitePress documentation with dynstruct parity
+- Adopted `@actdim/dev-config` presets for ESLint, Prettier, and TypeScript configuration
+- Synchronized workspace dependencies to `>=1.14.0`
+
 ### 1.12.0 (2026-11-01)
 - Version aligned with the mempart monorepo release; no library changes
 
