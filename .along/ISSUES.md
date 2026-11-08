@@ -11,6 +11,7 @@
 - [ ] `(bug)` [remote-frame-type-export](ISSUES/bug--remote-frame-type-export.md)
 - [ ] `(bug)` [server-bus-subscription-mapping](ISSUES/bug--server-bus-subscription-mapping.md)
 - [ ] `(debt)` [add-eslint](ISSUES/debt--add-eslint.md)
+- [ ] `(feat)` [socket-backpressure](ISSUES/feat--socket-backpressure.md)
 - [ ] `(task)` [docs-ci-pages-parity](ISSUES/task--docs-ci-pages-parity.md)
 
 ## Done (recent)
