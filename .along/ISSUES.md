@@ -1,7 +1,7 @@
 # Active Issues
 
 ## Active
-- [ ] `(task)` [adopt-dev-config](ISSUES/task--adopt-dev-config.md)
+<!-- No active issues -->
 
 ## Backlog
 - [ ] `(bug)` [auth-on-open-race](ISSUES/bug--auth-on-open-race.md)
@@ -14,4 +14,5 @@
 - [ ] `(task)` [docs-ci-pages-parity](ISSUES/task--docs-ci-pages-parity.md)
 
 ## Done (recent)
+- [x] `(task)` [adopt-dev-config](ISSUES/done/task--adopt-dev-config.md)
 - [x] `(docs)` [kb-parity-and-pages](ISSUES/done/docs--kb-parity-and-pages.md)
