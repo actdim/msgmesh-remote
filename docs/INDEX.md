@@ -4,7 +4,7 @@ slug: INDEX
 title: '@actdim/msgmesh-remote - Knowledge Base Topic Index'
 type: index
 created: 2026-11-01
-updated: 2026-11-05
+updated: 2026-11-08
 tags: [index, kb, topics, map]
 ---
 
@@ -27,10 +27,10 @@ flowchart TD
     INDEX --> T_04_INTEGRATION_GUIDE
     T_05_API_REFERENCE["API Reference"]
     INDEX --> T_05_API_REFERENCE
-    T_ALONG_PROTOCOL["Along Protocol Reference"]
-    INDEX --> T_ALONG_PROTOCOL
     T_ARCHITECTURE["Architecture"]
     INDEX --> T_ARCHITECTURE
+    T_DEPENDENCIES["Dependencies & AI Documentation for @actdim/msgmesh-remote"]
+    INDEX --> T_DEPENDENCIES
     T_DOMAIN_MODEL["Domain Model"]
     INDEX --> T_DOMAIN_MODEL
     T_LICENSE["License"]
@@ -76,8 +76,8 @@ flowchart TD
 - **[Architecture & Wiring](./topic--03-architecture-and-wiring.md)** (topic) `03-architecture-and-wiring`, `sequence`, `bridge`, `session`, `rpc`, `pubsub`
 - **[Integration Guide](./topic--04-integration-guide.md)** (topic) `04-integration-guide`, `install`, `fastify`, `websocket`, `bridge`, `testing`
 - **[API Reference](./topic--05-api-reference.md)** (topic) `05-api-reference`, `api`, `client`, `server`, `protocol`, `types`
-- **[Along Protocol Reference](./topic--along-protocol.md)** (reference) `protocol`, `agents-md`, `checklist`, `routing`, `concurrency`, `along-team`, `conventions`
 - **[Architecture](./topic--architecture.md)** (topic) `architecture`
+- **[Dependencies & AI Documentation for @actdim/msgmesh-remote](./topic--dependencies.md)** (topic) `dependencies`, `subproject`, `ai-context`, `rules`
 - **[Domain Model](./topic--domain-model.md)** (topic) `domain-model`, `frames`, `protocol`, `contracts`
 - **[License](./topic--license.md)** (license) `license`, `mit`
 - **[Setup And Workflow](./topic--setup-and-workflow.md)** (topic) `setup-and-workflow`, `build`, `test`, `docs`, `monorepo`

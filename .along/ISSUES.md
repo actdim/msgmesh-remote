@@ -10,6 +10,7 @@
 - [ ] `(bug)` [no-transport-retry-loop](ISSUES/bug--no-transport-retry-loop.md)
 - [ ] `(bug)` [remote-frame-type-export](ISSUES/bug--remote-frame-type-export.md)
 - [ ] `(bug)` [server-bus-subscription-mapping](ISSUES/bug--server-bus-subscription-mapping.md)
+- [ ] `(task)` [adopt-dev-config](ISSUES/task--adopt-dev-config.md)
 - [ ] `(task)` [docs-ci-pages-parity](ISSUES/task--docs-ci-pages-parity.md)
 
 ## Done (recent)
