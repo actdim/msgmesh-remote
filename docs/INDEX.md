@@ -4,7 +4,7 @@ slug: INDEX
 title: '@actdim/msgmesh-remote - Knowledge Base Topic Index'
 type: index
 created: 2026-11-01
-updated: 2026-11-09
+updated: 2026-11-10
 tags: [index, kb, topics, map]
 ---
 
