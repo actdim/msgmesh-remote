@@ -1,11 +1,11 @@
 ---
 protocol: along
-protocol_version: "4.6.1"
-slug: dependencies
+protocol_version: "4.8.1"
+slug: topic--dependencies
 title: Dependencies & AI Documentation for @actdim/msgmesh-remote
 type: topic
-created: 2026-11-06
-updated: 2026-11-06
+created: 2026-11-11
+updated: 2026-11-11
 tags: [dependencies, subproject, ai-context, rules]
 ---
 
@@ -19,11 +19,13 @@ tags: [dependencies, subproject, ai-context, rules]
 
 | Internal Package | Relative Path | AI Documentation & Context |
 | :--- | :--- | :--- |
-| **`@actdim/msgmesh`** | [`../../../../scratch/07-ci/ci-clone/src/packages/msgmesh`](../../../../scratch/07-ci/ci-clone/src/packages/msgmesh) | [AGENTS.md](../../../../scratch/07-ci/ci-clone/src/packages/msgmesh/AGENTS.md) <br> [CLAUDE.md](../../../../scratch/07-ci/ci-clone/src/packages/msgmesh/CLAUDE.md) <br> [llms-full.txt](../../../../scratch/07-ci/ci-clone/src/packages/msgmesh/llms-full.txt) <br> [llms.txt](../../../../scratch/07-ci/ci-clone/src/packages/msgmesh/llms.txt) <br> [.along/](../../../../scratch/07-ci/ci-clone/src/packages/msgmesh/.along) <br> [docs/](../../../../scratch/07-ci/ci-clone/src/packages/msgmesh/docs) |
+| **`@actdim/msgmesh`** | [`../../msgmesh`](../../msgmesh) | [AGENTS.md](../../msgmesh/AGENTS.md) <br> [CLAUDE.md](../../msgmesh/CLAUDE.md) <br> [llms-full.txt](../../msgmesh/llms-full.txt) <br> [llms.txt](../../msgmesh/llms.txt) <br> [.along/](../../msgmesh/.along) <br> [docs/](../../msgmesh/docs) |
 
 ## Declared External Dependencies with AI Guidelines
 
-No active external dependencies with AI instructions were detected.
+| Package | Ecosystem | Version | AI Guidelines / Instructions |
+| :--- | :--- | :--- | :--- |
+| **`@actdim/dev-config`** | `npm` | `1.14.0` | [AGENTS.md](../../../app-core/packages/dev-config/AGENTS.md) <br> manifest metadata (`ai`) |
 
 ## Transitive Dependency Guidelines & Invariants
 
