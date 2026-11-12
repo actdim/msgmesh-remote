@@ -13,6 +13,7 @@
 - [ ] `(debt)` [add-eslint](ISSUES/debt--add-eslint.md)
 - [ ] `(feat)` [socket-backpressure](ISSUES/feat--socket-backpressure.md)
 - [ ] `(task)` [docs-ci-pages-parity](ISSUES/task--docs-ci-pages-parity.md)
+- [ ] `(task)` [docs-static-publish](ISSUES/task--docs-static-publish.md)
 
 ## Done (recent)
 - [x] `(task)` [adopt-dev-config](ISSUES/done/task--adopt-dev-config.md)
